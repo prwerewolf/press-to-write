@@ -105,6 +105,9 @@ EOF
     else
         echo "Warning: could not prepare certificate files for '$SIGNING_IDENTITY'; using ad-hoc signing."
     fi
+    # The key now lives in the keychain, or the import failed and the next build
+    # starts over. Either way, leave no unencrypted private key in the build folder.
+    rm -rf "$CERT_DIR"
 fi
 
 if has_signing_identity && codesign --force --deep --sign "$SIGNING_IDENTITY" "$APP_BUNDLE" 2>/dev/null; then
