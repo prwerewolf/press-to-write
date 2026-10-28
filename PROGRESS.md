@@ -6,6 +6,36 @@ Press To Write is a local-first push-to-talk speech dictation app for Apple Sili
 
 ### Recently Completed & Verified
 
+**Two-Mac review fixes (October 28, 2026; verified locally on one Mac):**
+
+- Rescue transcription now works on a temporary copy. The speech engine deletes
+  every file it is given, even after an error, so a failed or canceled "Transcribe
+  Last Recording" used to destroy the saved recording. It now survives and can be
+  retried. Reproduced against the real engine code before the fix.
+- An explicitly chosen microphone is the only capture attempt. If it is missing the
+  existing unavailable error appears instead of recording from another input. Only
+  System Default keeps the cascade (default, built-in, any input, unconfigured
+  default). A paste is skipped when focus moved to a different control in the same
+  app (role or frame differs); unreadable lookups keep the application-level check.
+- The Permissions screen links to System Settings after microphone access was
+  declined. Hotkey monitors re-arm when Accessibility is granted while the app runs.
+- The pill icon is decoded once. A standalone benchmark measured 6.78 ms per draw
+  when reloaded versus 0.01 ms when reused; the cost inside the running app was not
+  measured. The 3-second status poll no longer republishes unchanged values.
+  `build_app.sh` removes the generated key material after the identity import.
+- Verified: all twelve Swift suites, all 84 Python tests (also on Python 3.11, 3.12,
+  and 3.14), a debug and a release build, and the source and history privacy checks.
+  New regressions cover rescue retention, microphone selection, field switches, the
+  hotkey re-arm rule, and unchanged-status polling; the field-switch tests were
+  mutation-checked. The key cleanup was verified with a stubbed keychain import.
+- Not verified: the field-switch rule against real browsers or Electron apps, the
+  Permissions screen after a real denial, the hotkey re-arm after a real grant, and
+  any run on the second Mac. Needs Accessibility and microphone permission on a Mac.
+- Known and unchanged: Professional style turns a spoken "period" that ends an
+  utterance into punctuation, which drops the noun in "the grace period" (Natural
+  and Raw keep it). Two different builds running at once could keep replacing each
+  other's daemon; this was not reproduced. The 3-second poll cadence is unmeasured.
+
 **Press To Write naming cleanup (October 13, 2026; verified locally):**
 
 - Current app, runtime, and documentation names use **Press To Write**, with
@@ -193,8 +223,8 @@ Press To Write is a local-first push-to-talk speech dictation app for Apple Sili
    - **Dynamic Excision & Chained Undo Correction**: Replaced static match iteration with dynamic live-string re-matching in `TextCleaner.swift` and added support for chained undo phrases (`"meeting at four, scratch that, cancel that, five"` -> `"meeting at five"`), while preserving noun phrases (`"a scratch that hurts"`).
    - **Multi-Display Topology Auto-Recovery**: Added an observer for `NSApplication.didChangeScreenParametersNotification` in `FloatingPillWindow.swift` to automatically re-anchor the floating pill to the main screen if an external display is disconnected.
 
-9. **Multi-Device Fallback Cascade (`AudioInputSelection.candidates`)**:
-   - Dynamic prioritized candidate resolution (`preferred -> built-in -> system default -> AUHAL default`).
+9. **Multi-Device Fallback Cascade (`AudioInputSelection.captureAttempts`)**:
+   - System Default only: `default -> built-in -> any input -> AUHAL default`. An explicit selection is exact and never falls back.
    - Prevents capture failures and freezes when an input device (e.g., iPhone Continuity Camera mic) enters an invalid or non-responsive AUHAL state (`Input:No | Output:No`, error `1852797029`).
 
 10. **Unconditional Hotkey Modifier Unlatching (`HotkeyManager.swift`)**:
@@ -235,7 +265,7 @@ Press To Write is a local-first push-to-talk speech dictation app for Apple Sili
    - **Build Script Signing Hardening (`build_app.sh`)**: Added graceful ad-hoc signing fallback if persistent developer identity signing cannot access the keychain or is run non-interactively.
 
 ### Verification Status
-- All eleven Swift regression suites passed locally: cleaner, local-daemon-client, streaming-session, hotkeys, keyboard shortcuts, correction learning, insertion-target, microphone, audio conversion/config, pill-display, and app-state.
+- All twelve Swift regression suites passed locally: cleaner, local-daemon-client, streaming-session, hotkeys, keyboard shortcuts, correction learning, insertion-target, microphone, audio conversion/config, pill-display, app-state, and preference-migration.
 - All 84 Python tests passed: 47 daemon tests, 7 setup tests, 13 fast-engine/setup tests, and 17 privacy tests.
 - App bundle cleanly compiles, packages, and signs (`make build`).
 - Source and published-history privacy checks passed. The actual staged tree and
