@@ -51,8 +51,26 @@ public final class HotkeyManager {
         AXIsProcessTrustedWithOptions(options)
     }
 
+    private var lastKnownTrust: Bool?
+
+    /// Event monitors installed before Accessibility was granted may never receive
+    /// events. Re-arm them the moment trust appears, wherever it was granted from.
+    static func shouldRearm(lastKnownTrust: Bool?, isTrusted: Bool) -> Bool {
+        isTrusted && lastKnownTrust == false
+    }
+
+    /// Call periodically. Returns true when the monitors were re-armed.
+    @discardableResult
+    public func rearmIfAccessibilityBecameTrusted(isTrusted: Bool = HotkeyManager.isAccessibilityGranted()) -> Bool {
+        let rearm = Self.shouldRearm(lastKnownTrust: lastKnownTrust, isTrusted: isTrusted)
+        lastKnownTrust = isTrusted
+        if rearm { startListening() }
+        return rearm
+    }
+
     public func startListening() {
         stopListening()
+        lastKnownTrust = Self.isAccessibilityGranted()
 
         // Global flag changes (Fn, Option, Command, etc.)
         globalFlagsMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in

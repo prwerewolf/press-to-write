@@ -43,6 +43,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     private func startWatchdog() {
         watchdogTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { _ in
             Task { @MainActor in
+                HotkeyManager.shared.rearmIfAccessibilityBecameTrusted()
                 self.ensureStatusItemVisible()
                 await AppState.shared.refreshEngineStatus()
             }

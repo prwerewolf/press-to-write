@@ -125,6 +125,20 @@ struct HotkeyTests {
         manager.handleFlagsChanged(event: event(0, flags: []))
         expect(["up"], "FlagsChanged without right option mask must unlatch Option and trigger up")
 
+        // Monitors installed before Accessibility was granted are re-armed once, on the grant.
+        let rearmCases: [(Bool?, Bool, Bool, String)] = [
+            (false, true, true, "Granting Accessibility after launch re-arms the hotkey monitors"),
+            (true, true, false, "Staying trusted never re-arms, so a held hotkey is not disturbed"),
+            (false, false, false, "Staying untrusted does nothing"),
+            (true, false, false, "Revoking access does not re-arm"),
+            (nil, true, false, "A first observation is recorded without re-arming"),
+            (nil, false, false, "A first untrusted observation is recorded without re-arming")
+        ]
+        for (last, trusted, expected, description) in rearmCases {
+            precondition(HotkeyManager.shouldRearm(lastKnownTrust: last, isTrusted: trusted) == expected, description)
+            checked += 1
+        }
+
         print("All Press To Write hotkey tests passed (\(checked) scenarios).")
     }
 }
