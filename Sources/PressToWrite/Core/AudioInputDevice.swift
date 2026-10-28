@@ -60,22 +60,38 @@ public enum AudioInputSelection {
         return device
     }
 
-    /// Provides prioritized candidates to ensure audio capture never fails if the preferred device is unresponsive.
-    public static func candidates(
+    /// Ordered capture attempts for one recording or level test. `nil` stands for
+    /// the unconfigured AUHAL default input.
+    ///
+    /// An explicit choice yields exactly that device or an error, so dictation
+    /// never records from a microphone the user did not pick. Only "System
+    /// Default" may fall back, because the default can name an input that cannot
+    /// start (for example an unreachable Continuity iPhone).
+    public static func captureAttempts(
         selectedUID: String,
+        devices: [AudioInputDevice],
+        systemDefaultID: UInt32?
+    ) throws -> [AudioInputDevice?] {
+        if !selectedUID.isEmpty {
+            return [try resolve(selectedUID: selectedUID, devices: devices, systemDefaultID: systemDefaultID)]
+        }
+        return systemDefaultCascade(devices: devices, systemDefaultID: systemDefaultID).map { Optional($0) } + [nil]
+    }
+
+    /// The system default first, then the built-in microphone, then any other input.
+    static func systemDefaultCascade(
         devices: [AudioInputDevice],
         systemDefaultID: UInt32?
     ) -> [AudioInputDevice] {
         var result: [AudioInputDevice] = []
         var seenIDs = Set<UInt32>()
 
-        // 1. Primary choice if resolvable
-        if let primary = try? resolve(selectedUID: selectedUID, devices: devices, systemDefaultID: systemDefaultID) {
+        if let defaultID = systemDefaultID,
+           let primary = devices.first(where: { $0.id == defaultID }) {
             result.append(primary)
             seenIDs.insert(primary.id)
         }
 
-        // 2. Built-in microphone fallback
         if let builtIn = devices.first(where: {
             $0.uid == "BuiltInMicrophoneDevice" ||
             $0.uid.localizedCaseInsensitiveContains("built-in") ||
@@ -88,15 +104,6 @@ public enum AudioInputSelection {
             seenIDs.insert(builtIn.id)
         }
 
-        // 3. System default fallback
-        if let defaultID = systemDefaultID,
-           let defaultDev = devices.first(where: { $0.id == defaultID }),
-           !seenIDs.contains(defaultDev.id) {
-            result.append(defaultDev)
-            seenIDs.insert(defaultDev.id)
-        }
-
-        // 4. Any remaining available devices
         for dev in devices where !seenIDs.contains(dev.id) {
             result.append(dev)
             seenIDs.insert(dev.id)

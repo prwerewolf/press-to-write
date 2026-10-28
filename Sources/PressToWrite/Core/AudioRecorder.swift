@@ -65,18 +65,15 @@ public final class AudioRecorder: NSObject {
 
         let microphone = MicrophoneController.shared
         microphone.refreshDevices()
-        let candidateDevices = AudioInputSelection.candidates(
+        // Throws when an explicitly chosen microphone is not connected.
+        let attempts = try AudioInputSelection.captureAttempts(
             selectedUID: microphone.selectedInputUID,
             devices: microphone.availableInputs,
             systemDefaultID: microphone.systemDefaultID
         )
 
-        var candidatesToTry: [AudioInputDevice?] = candidateDevices.map { Optional($0) }
-        // Fallback to unconfigured AUHAL default if explicit candidates fail
-        candidatesToTry.append(nil)
-
         var lastError: Error?
-        for candidate in candidatesToTry {
+        for candidate in attempts {
             do {
                 let url = try attemptStartCapture(device: candidate, onPCM16: onPCM16)
                 return url
@@ -194,17 +191,14 @@ public final class AudioRecorder: NSObject {
         stopMicrophoneTest()
         let microphone = MicrophoneController.shared
         microphone.refreshDevices()
-        let candidateDevices = AudioInputSelection.candidates(
+        let attempts = try AudioInputSelection.captureAttempts(
             selectedUID: microphone.selectedInputUID,
             devices: microphone.availableInputs,
             systemDefaultID: microphone.systemDefaultID
         )
 
         var lastError: Error?
-        var candidatesToTry: [AudioInputDevice?] = candidateDevices.map { Optional($0) }
-        candidatesToTry.append(nil)
-
-        for candidate in candidatesToTry {
+        for candidate in attempts {
             do {
                 let (engine, device, inputFormat) = try makeInputEngine(device: candidate)
                 let token = UUID()

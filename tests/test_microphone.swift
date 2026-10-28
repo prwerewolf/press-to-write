@@ -88,17 +88,60 @@ struct MicrophoneSelectionTests {
             selectedUID: "", devices: devices, systemDefaultID: 999,
             "System selection must fail when the default is absent from available inputs"
         )
-        // Candidate selection must provide fallback candidates when explicit is missing or first fails
+        // Capture attempts: only System Default may fall back to another input.
         let continuityMic = AudioInputDevice(id: 119, uid: "iphone-continuity", name: "iPhone Microphone")
-        let candidates1 = AudioInputSelection.candidates(selectedUID: "", devices: [continuityMic, builtIn], systemDefaultID: continuityMic.id)
-        precondition(candidates1.first == continuityMic, "Default is primary candidate")
-        precondition(candidates1.contains(builtIn), "Built-in microphone is included as fallback")
-        checked += 2
 
-        let candidates2 = AudioInputSelection.candidates(selectedUID: headset.uid, devices: [builtIn, continuityMic], systemDefaultID: continuityMic.id)
-        precondition(candidates2.first == builtIn, "Missing preferred microphone falls back to built-in first")
-        precondition(candidates2.contains(continuityMic), "Default microphone is next fallback")
-        checked += 2
+        func expectAttempts(
+            _ selectedUID: String, _ available: [AudioInputDevice], default defaultID: UInt32?,
+            _ expected: [AudioInputDevice?], _ description: String
+        ) throws {
+            let actual = try AudioInputSelection.captureAttempts(
+                selectedUID: selectedUID, devices: available, systemDefaultID: defaultID
+            )
+            precondition(actual == expected, "\(description): expected \(expected), got \(actual)")
+            checked += 1
+        }
+
+        func expectAttemptsUnavailable(
+            _ selectedUID: String, _ available: [AudioInputDevice], default defaultID: UInt32?, _ description: String
+        ) {
+            do {
+                let attempts = try AudioInputSelection.captureAttempts(
+                    selectedUID: selectedUID, devices: available, systemDefaultID: defaultID
+                )
+                preconditionFailure("\(description): unexpectedly attempted \(attempts)")
+            } catch let error as MicrophoneError {
+                precondition(error == .selectedUnavailable, "\(description): wrong error \(error)")
+                checked += 1
+            } catch {
+                preconditionFailure("\(description): unexpected error \(error)")
+            }
+        }
+
+        try expectAttempts(
+            "", [continuityMic, builtIn], default: continuityMic.id, [continuityMic, builtIn, nil],
+            "System Default tries the default, then the built-in microphone, then the unconfigured default"
+        )
+        try expectAttempts(
+            "", [builtIn, headset], default: 999, [builtIn, headset, nil],
+            "A default that is absent from the inputs falls back to the built-in microphone"
+        )
+        try expectAttempts(
+            "", [], default: nil, [nil],
+            "System Default with no enumerated inputs still tries the unconfigured default"
+        )
+        try expectAttempts(
+            headset.uid, [builtIn, headset, continuityMic], default: continuityMic.id, [headset],
+            "An explicit microphone is the only attempt, with no built-in or unconfigured fallback"
+        )
+        expectAttemptsUnavailable(
+            headset.uid, [builtIn, continuityMic], default: continuityMic.id,
+            "A disconnected explicit microphone must fail instead of recording from another input"
+        )
+        expectAttemptsUnavailable(
+            headset.uid, [], default: nil,
+            "An explicit microphone fails when no inputs exist"
+        )
 
         print("Microphone selection: \(checked) regression checks passed")
     }
