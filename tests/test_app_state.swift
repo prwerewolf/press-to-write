@@ -78,6 +78,7 @@ public final class LocalDaemonClient: SpeechEngineProtocol {
     public var suspend = false
     public var pending: [CheckedContinuation<String, Error>] = []
     public private(set) var requests: [(vocabulary: [String], style: TranscriptionStyle, context: String?)] = []
+    public private(set) var audioURLs: [URL] = []
     public func engineStatus(mode: SpeechMode = .accuracy) async -> LocalEngineStatus { status }
     public private(set) var streams: [LocalStreamingSession] = []
     public func startStreaming(vocabulary: [String]) -> LocalStreamingSession {
@@ -87,6 +88,10 @@ public final class LocalDaemonClient: SpeechEngineProtocol {
     }
     public func transcribe(audioFileURL: URL, vocabulary: [String], style: TranscriptionStyle, context: String? = nil) async throws -> String {
         requests.append((vocabulary, style, context))
+        audioURLs.append(audioFileURL)
+        // The real daemon removes every file it is asked to transcribe, including
+        // after an engine error or cancellation. The app must hand it a copy.
+        defer { try? FileManager.default.removeItem(at: audioFileURL) }
         if suspend {
             return try await withCheckedThrowingContinuation { pending.append($0) }
         }
@@ -498,6 +503,40 @@ struct AppStateTests {
         precondition(RescueAudioController.shared.pendingMetadata?.status == "transcribed", "Status marked transcribed")
         precondition(state.lastTranscribedText == "Rescued speech content")
         precondition(NSPasteboard.general.writes.contains("Rescued speech content"))
+        let rescueURL = RescueAudioController.shared.rescueAudioURL
+        let rescueCopy = engine.audioURLs.last!
+        precondition(rescueCopy != rescueURL, "The engine must receive a disposable copy, never the saved recording")
+        precondition(!FileManager.default.fileExists(atPath: rescueCopy.path), "The disposable copy must not be left behind")
+        precondition(RescueAudioController.shared.hasRescueAudio,
+                     "A completed rescue keeps the saved recording, as a normal dictation does")
+
+        // The saved recording must survive a failed attempt so it can be retried.
+        engine.result = .failure(NSError(domain: "Test", code: 2, userInfo: [NSLocalizedDescriptionKey: "Engine failure"]))
+        state.transcribeRescueAudio()
+        try await waitUntil { !state.isProcessing }
+        precondition(RescueAudioController.shared.pendingMetadata?.status == "failed", "Failure is recorded")
+        precondition(RescueAudioController.shared.hasRescueAudio, "A failed rescue must not delete the saved recording")
+        precondition(!FileManager.default.fileExists(atPath: engine.audioURLs.last!.path))
+
+        // Escape during a rescue must not delete it, and a late result is ignored.
+        engine.suspend = true
+        let writesBeforeCancel = NSPasteboard.general.writes.count
+        state.transcribeRescueAudio()
+        try await waitUntil { engine.pending.count == 1 }
+        state.cancelDictation()
+        precondition(RescueAudioController.shared.hasRescueAudio, "Canceling a rescue must not delete the saved recording")
+        engine.pending.removeFirst().resume(returning: "Late rescued text")
+        let canceledCopy = engine.audioURLs.last!
+        try await waitUntil { !FileManager.default.fileExists(atPath: canceledCopy.path) }
+        precondition(RescueAudioController.shared.hasRescueAudio, "A late engine result must not delete the saved recording")
+        precondition(NSPasteboard.general.writes.count == writesBeforeCancel, "A canceled rescue must not reach the clipboard")
+        engine.suspend = false
+
+        // The same recording remains usable for a retry.
+        engine.result = .success("Retried rescue")
+        state.transcribeRescueAudio()
+        try await waitUntil { !state.isProcessing }
+        precondition(state.lastTranscribedText == "Retried rescue", "A rescue can be retried after a failure or cancel")
         RescueAudioController.shared.clearRescueAudio()
         try? FileManager.default.removeItem(at: testRescueAudio)
 

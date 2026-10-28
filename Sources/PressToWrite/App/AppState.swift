@@ -757,8 +757,23 @@ public final class AppState: ObservableObject {
             return
         }
 
-        let rescueURL = RescueAudioController.shared.rescueAudioURL
         let duration = RescueAudioController.shared.pendingMetadata?.duration ?? 0.0
+
+        // The speech engine deletes every file it is asked to transcribe, even after
+        // an error. Give it a disposable copy so a failed or canceled attempt leaves
+        // the saved recording available for another try.
+        let workingURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("presstowrite_rescue_\(UUID().uuidString).wav")
+        do {
+            try FileManager.default.copyItem(at: RescueAudioController.shared.rescueAudioURL, to: workingURL)
+        } catch {
+            NSLog("[Press To Write Rescue] Could not read rescued audio: %@", error.localizedDescription)
+            clearFeedback()
+            statusMessage = "Rescued Audio Unreadable"
+            SoundEffects.shared.playError()
+            scheduleFeedbackReset(after: 3_000_000_000)
+            return
+        }
 
         clearFeedback()
         self.isProcessing = true
@@ -771,10 +786,11 @@ public final class AppState: ObservableObject {
         let effectiveStyle = resolveEffectiveStyle(baseStyle: transcriptionStyle, target: nil)
         let requestID = UUID()
         transcriptionID = requestID
-        processingAudioURL = rescueURL
+        processingAudioURL = workingURL
 
         transcriptionTask = Task {
             defer {
+                try? FileManager.default.removeItem(at: workingURL)
                 if self.transcriptionID == requestID {
                     self.isProcessing = false
                     self.processingAudioURL = nil
@@ -786,7 +802,7 @@ public final class AppState: ObservableObject {
             guard self.transcriptionID == requestID, !Task.isCancelled else { return }
 
             do {
-                let rawText = try await LocalDaemonClient.shared.transcribe(audioFileURL: rescueURL, vocabulary: vocabulary, style: effectiveStyle)
+                let rawText = try await LocalDaemonClient.shared.transcribe(audioFileURL: workingURL, vocabulary: vocabulary, style: effectiveStyle)
                 try Task.checkCancellation()
                 guard self.transcriptionID == requestID else { return }
                 let cleanedText = TextCleaner.shared.clean(text: rawText, style: effectiveStyle, vocabulary: vocabulary, replacements: replacements)
