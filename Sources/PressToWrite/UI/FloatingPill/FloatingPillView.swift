@@ -30,7 +30,7 @@ public struct FloatingPillView: View {
     private var appIconView: some View {
         ZStack {
             // App Icon (Contender 1 Studio Mic)
-            if let icon = loadAppIcon() {
+            if let icon = Self.appIcon {
                 Image(nsImage: icon)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
@@ -228,7 +228,11 @@ public struct FloatingPillView: View {
         }
     }
 
-    private func loadAppIcon() -> NSImage? {
+    // Decoding the 1024-pixel master costs several milliseconds, and this view's
+    // body runs for every audio-level update while recording. Load it once.
+    private static let appIcon: NSImage? = loadAppIcon()
+
+    private static func loadAppIcon() -> NSImage? {
         if let masterURL = Bundle.main.url(forResource: "AppIcon_master", withExtension: "png"),
            let img = NSImage(contentsOf: masterURL) {
             return img
