@@ -4,6 +4,7 @@ import Combine
 
 public struct PermissionsView: View {
     @State private var hasMic: Bool = AudioRecorder.shared.hasPermission
+    @State private var micDenied: Bool = AudioRecorder.shared.isPermissionDenied
     @State private var hasAccessibility: Bool = HotkeyManager.isAccessibilityGranted()
     @State private var allGrantedNotice: Bool = false
     @State private var statusInfo: String = ""
@@ -61,6 +62,11 @@ public struct PermissionsView: View {
                     Text("Needed to record your voice when holding the hotkey. Audio is processed on this Mac; temporary recordings are deleted after processing or cancellation.")
                         .font(.caption)
                         .foregroundColor(.secondary)
+                    if micDenied && !hasMic {
+                        Text("Access was declined, so macOS will not ask again. Turn on Press To Write under Privacy & Security → Microphone.")
+                            .font(.caption)
+                            .foregroundColor(.orange)
+                    }
                 }
 
                 Spacer()
@@ -69,10 +75,19 @@ public struct PermissionsView: View {
                     Label("Granted", systemImage: "checkmark.circle.fill")
                         .font(.caption)
                         .foregroundColor(.green)
+                } else if micDenied {
+                    // macOS shows its prompt only once; afterward the request does nothing.
+                    Button("Open Settings") {
+                        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
                 } else {
                     Button("Grant Access") {
                         AudioRecorder.shared.requestPermission { granted in
                             hasMic = granted
+                            micDenied = AudioRecorder.shared.isPermissionDenied
                         }
                     }
                     .buttonStyle(.borderedProminent)
@@ -201,6 +216,8 @@ public struct PermissionsView: View {
         let mic = AudioRecorder.shared.hasPermission
         let ax = HotkeyManager.isAccessibilityGranted()
         if mic != hasMic { hasMic = mic }
+        let denied = AudioRecorder.shared.isPermissionDenied
+        if denied != micDenied { micDenied = denied }
         if ax != hasAccessibility {
             hasAccessibility = ax
             if ax {

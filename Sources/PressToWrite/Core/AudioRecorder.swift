@@ -58,6 +58,17 @@ public final class AudioRecorder: NSObject {
         }
     }
 
+    /// True once macOS will no longer show its prompt, so access can only be
+    /// granted in System Settings. Distinct from "not asked yet".
+    public var isPermissionDenied: Bool {
+        if #available(macOS 14.0, *) {
+            return AVAudioApplication.shared.recordPermission == .denied
+        } else {
+            let status = AVCaptureDevice.authorizationStatus(for: .audio)
+            return status == .denied || status == .restricted
+        }
+    }
+
     /// Starts a 16 kHz mono PCM recording using the best available input device with automatic fallback.
     public func startRecording(onPCM16: ((Data) -> Void)? = nil) throws -> URL {
         if isRecordingInternal, let existingURL = tempFileURL { return existingURL }
