@@ -91,7 +91,7 @@ struct GeneralSettingsTab: View {
                 HStack {
                     Text("Floating Pill Position")
                     Spacer()
-                    Button("Center Pill on Screen") {
+                    Button("Reset Pill to Bottom Center") {
                         if let appDelegate = NSApp.delegate as? AppDelegate {
                             appDelegate.pillPanel?.resetPositionToCenter()
                         }
