@@ -469,9 +469,11 @@ public final class AppState: ObservableObject {
             Task { await self.refreshEngineStatus() }
             return
         }
-        engineStatus = status
+        // Assigning a @Published property always notifies observers, even with an
+        // equal value, so skip no-op writes from this periodic poll.
+        if engineStatus != status { engineStatus = status }
         if !isRecording, !isProcessing, !showSuccess,
-           statusMessage == previous.message {
+           statusMessage == previous.message, statusMessage != "Ready" {
             statusMessage = "Ready"
         }
     }

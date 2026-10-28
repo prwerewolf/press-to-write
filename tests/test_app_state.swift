@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 // Compile with AppState, PreferenceMigration, SpeechEngine, and TextCleaner.
 // These doubles keep tests away from the microphone, system preferences,
@@ -229,6 +230,22 @@ struct AppStateTests {
         state.startRecording()
         precondition(!state.isRecording, "Loading model must not appear ready")
         await state.refreshEngineStatus()
+
+        // The watchdog polls for the app's whole life. A poll that finds nothing new
+        // must not invalidate every view observing the state.
+        var publishes = 0
+        let observer = state.objectWillChange.sink { publishes += 1 }
+        await state.refreshEngineStatus()
+        await state.refreshEngineStatus()
+        precondition(publishes == 0, "An unchanged engine status must not be republished (\(publishes) publishes)")
+        engine.status = LocalEngineStatus(phase: .loading, message: "Warming up", model: nil)
+        await state.refreshEngineStatus()
+        precondition(publishes > 0 && state.engineStatus.message == "Warming up", "A changed status is still published")
+        engine.status = LocalEngineStatus(phase: .ready, message: "Ready", model: "test-local-model")
+        await state.refreshEngineStatus()
+        precondition(state.engineStatus.phase == .ready && state.statusMessage == "Ready")
+        observer.cancel()
+
         state.startRecording()
         state.stopRecordingAndTranscribe()
         try await waitUntil { !state.isProcessing }
