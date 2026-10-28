@@ -50,7 +50,7 @@ Your microphone choice, vocabulary, text replacements, history, and recordings a
 1. Wait for the local speech engine to show **Ready** in Settings → Speech Engine.
 2. Hold **Fn / Globe**, speak, and release to transcribe. Alternative hotkeys and toggle mode are available in Settings.
 3. Press **Escape** to discard a recording or cancel a pending dictation.
-4. Text is inserted only if the original app and focused control still own the cursor. If focus changes, your result remains available through **Copy Last Dictation** in the menu bar or the pill's Copy button.
+4. Text is inserted only if the original app and focused control still own the cursor. If focus changes, your result remains available through **Copy Last Dictation** in the menu bar or the pill's Copy button. An app that exposes too little accessibility detail to tell two controls apart is checked at the application level only.
 
 The compact pill can be dragged to screen edges and remembers its monitor across restarts. Its waveform shows recording activity; loading and error states have explanatory tooltips.
 

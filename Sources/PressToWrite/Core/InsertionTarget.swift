@@ -256,23 +256,70 @@ public struct InsertionTarget {
         guard let currentPID = NSWorkspace.shared.frontmostApplication?.processIdentifier,
               currentPID == processID else { return false }
 
-        // If both original and current focused elements could be captured,
-        // check whether they match.
-        if let focused = focusedElement,
-           let currentFocus = Self.focus(in: applicationElement),
-           CFEqual(focused, currentFocus) {
-            return true
+        // Applications that don't expose control-level accessibility (e.g. some
+        // terminals), or that hand out proxy objects, leave the comparison unknown.
+        // Then verifying that the user is still in the same application is the
+        // best available check. Only positive evidence of another control blocks.
+        let comparison = Self.compareControls(original: focusedElement, current: Self.focus(in: applicationElement))
+        if comparison == .different {
+            NSLog("[Press To Write] Insertion skipped: focus moved to a different control")
         }
-
-        // For applications that don't expose control-level accessibility (e.g. web
-        // browsers, Electron apps like VS Code/Slack, terminals), or where accessibility
-        // proxy objects return false for CFEqual despite being in the same control,
-        // verify that the user is still in the same application.
         return Self.matches(
             originalProcessID: processID,
             currentProcessID: currentPID,
-            focusedElementMatches: true
+            focusedElementMatches: comparison != .different
         )
+    }
+
+    enum ControlComparison: Equatable {
+        case same
+        case different
+        case unknown
+    }
+
+    /// Browsers and Electron apps can return a new proxy object for the same field,
+    /// so CFEqual alone cannot prove a field switch. Compare what a person would
+    /// call "the same field": its role and on-screen frame. Report `.different`
+    /// only when both are readable and disagree; anything unreadable is `.unknown`.
+    static func compareControls(
+        original: AXUIElement?,
+        current: AXUIElement?,
+        setMessagingTimeout: (AXUIElement, Float) -> AXError = AXUIElementSetMessagingTimeout,
+        copyAttributeValue: (AXUIElement, CFString, UnsafeMutablePointer<CFTypeRef?>) -> AXError = AXUIElementCopyAttributeValue
+    ) -> ControlComparison {
+        guard let original, let current else { return .unknown }
+        if CFEqual(original, current) { return .same }
+
+        func read(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {
+            guard setMessagingTimeout(element, 0.2) == .success else { return nil }
+            var value: CFTypeRef?
+            guard copyAttributeValue(element, attribute as CFString, &value) == .success else { return nil }
+            return value
+        }
+        func frame(_ element: AXUIElement) -> CGRect? {
+            guard let position = read(element, kAXPositionAttribute as String),
+                  CFGetTypeID(position) == AXValueGetTypeID(),
+                  AXValueGetType(position as! AXValue) == .cgPoint,
+                  let size = read(element, kAXSizeAttribute as String),
+                  CFGetTypeID(size) == AXValueGetTypeID(),
+                  AXValueGetType(size as! AXValue) == .cgSize else { return nil }
+            var origin = CGPoint.zero
+            var extent = CGSize.zero
+            guard AXValueGetValue(position as! AXValue, .cgPoint, &origin),
+                  AXValueGetValue(size as! AXValue, .cgSize, &extent) else { return nil }
+            return CGRect(origin: origin, size: extent)
+        }
+
+        guard let originalRole = read(original, kAXRoleAttribute as String) as? String,
+              let currentRole = read(current, kAXRoleAttribute as String) as? String else { return .unknown }
+        if originalRole != currentRole { return .different }
+        guard let originalFrame = frame(original), let currentFrame = frame(current) else { return .unknown }
+        let tolerance: CGFloat = 1
+        let sameFrame = abs(originalFrame.minX - currentFrame.minX) <= tolerance
+            && abs(originalFrame.minY - currentFrame.minY) <= tolerance
+            && abs(originalFrame.width - currentFrame.width) <= tolerance
+            && abs(originalFrame.height - currentFrame.height) <= tolerance
+        return sameFrame ? .same : .different
     }
 
     // Kept separate from the system queries so focus policy can be tested without

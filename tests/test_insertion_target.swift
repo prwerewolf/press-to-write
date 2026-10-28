@@ -219,7 +219,93 @@ struct InsertionTargetTests {
         precondition(ApplicationCategory.category(for: "com.apple.Notes") == .prose)
         precondition(ApplicationCategory.category(for: nil) == .prose)
 
-        print("Insertion destination tests passed, including exact control identity, secure fields, read bounds, focus loss for correction learning, and application category mapping.")
+        // A field switch inside one app must block the paste. Distinct AX objects
+        // stand in for browser proxies; the fake table gives each a role and frame.
+        let fieldA = AXUIElementCreateApplication(getpid())
+        let fieldB = AXUIElementCreateSystemWide()
+        struct Control { var role: String?; var origin: CGPoint?; var size: CGSize? }
+        var controls: [(element: AXUIElement, control: Control)] = []
+        var attributeReads = 0
+        var failTimeout = false
+        func axValue(_ point: CGPoint) -> CFTypeRef {
+            var p = point
+            return AXValueCreate(.cgPoint, &p)!
+        }
+        func axValue(_ size: CGSize) -> CFTypeRef {
+            var s = size
+            return AXValueCreate(.cgSize, &s)!
+        }
+        func compare(_ original: AXUIElement?, _ current: AXUIElement?) -> InsertionTarget.ControlComparison {
+            attributeReads = 0
+            return InsertionTarget.compareControls(
+                original: original, current: current,
+                setMessagingTimeout: { _, _ in failTimeout ? .cannotComplete : .success },
+                copyAttributeValue: { element, attribute, result in
+                    attributeReads += 1
+                    guard let control = controls.first(where: { CFEqual($0.element, element) })?.control else {
+                        return .cannotComplete
+                    }
+                    switch attribute as String {
+                    case kAXRoleAttribute as String:
+                        guard let role = control.role else { return .attributeUnsupported }
+                        result.pointee = role as CFString
+                    case kAXPositionAttribute as String:
+                        guard let origin = control.origin else { return .attributeUnsupported }
+                        result.pointee = axValue(origin)
+                    case kAXSizeAttribute as String:
+                        guard let size = control.size else { return .attributeUnsupported }
+                        result.pointee = axValue(size)
+                    default:
+                        return .attributeUnsupported
+                    }
+                    return .success
+                }
+            )
+        }
+        func setControls(_ a: Control, _ b: Control) { controls = [(fieldA, a), (fieldB, b)] }
+        let field = Control(role: "AXTextField", origin: CGPoint(x: 100, y: 200), size: CGSize(width: 300, height: 24))
+
+        setControls(field, field)
+        precondition(compare(fieldA, fieldA) == .same && attributeReads == 0,
+                     "The identical AX object needs no attribute reads")
+        precondition(compare(fieldA, fieldB) == .same,
+                     "Distinct proxy objects for one role and frame are the same field")
+        var nearby = field
+        nearby.origin = CGPoint(x: 100.8, y: 200)
+        setControls(field, nearby)
+        precondition(compare(fieldA, fieldB) == .same, "Sub-point frame noise is the same field")
+
+        var movedField = field
+        movedField.origin = CGPoint(x: 100, y: 260)
+        setControls(field, movedField)
+        precondition(compare(fieldA, fieldB) == .different, "Another field of the same size below is a field switch")
+        var widerField = field
+        widerField.size = CGSize(width: 340, height: 24)
+        setControls(field, widerField)
+        precondition(compare(fieldA, fieldB) == .different, "A field at the same origin with another size is a field switch")
+        var otherRole = field
+        otherRole.role = "AXTextArea"
+        setControls(field, otherRole)
+        precondition(compare(fieldA, fieldB) == .different, "A different control role is a field switch")
+
+        // Unreadable evidence never blocks; the application check still applies.
+        var noRole = field
+        noRole.role = nil
+        setControls(field, noRole)
+        precondition(compare(fieldA, fieldB) == .unknown, "An unreadable role is unknown")
+        var noFrame = field
+        noFrame.size = nil
+        setControls(field, noFrame)
+        precondition(compare(fieldA, fieldB) == .unknown, "An unreadable frame is unknown")
+        setControls(field, movedField)
+        failTimeout = true
+        precondition(compare(fieldA, fieldB) == .unknown && attributeReads == 0,
+                     "A stalled application is unknown without an unbounded read")
+        failTimeout = false
+        precondition(compare(nil, fieldB) == .unknown && compare(fieldA, nil) == .unknown,
+                     "A missing focused element is unknown")
+
+        print("Insertion destination tests passed, including exact control identity, field switches, secure fields, read bounds, focus loss for correction learning, and application category mapping.")
     }
 }
 
