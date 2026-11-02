@@ -296,7 +296,7 @@ struct PrivacySettingsTab: View {
                         Text("Nothing You Say Is Saved")
                             .font(.caption)
                             .fontWeight(.semibold)
-                        Text("Audio stays in memory only while it is transcribed, and the text only until it is inserted or copied. No recordings, transcripts, or history are written to disk.")
+                        Text("Audio stays in memory only while it is transcribed. Your latest text stays in memory for Copy Last Dictation until your next dictation or until you quit. No recordings, transcripts, or history are written to disk.")
                             .font(.caption2)
                             .foregroundColor(.secondary)
                     }

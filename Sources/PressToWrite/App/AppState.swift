@@ -20,11 +20,15 @@ public final class AppState: ObservableObject {
     @Published public var currentAudioLevel: Float = 0.0
     @Published public var statusMessage: String = "Ready"
     @Published public var hasPendingInsertion: Bool = false
+    /// The latest dictation's text, for Copy Last Dictation. Memory only: dropped when
+    /// the next dictation is released and gone when the app quits. Never saved.
+    @Published public private(set) var lastDictation: String?
     @Published public var engineStatus = LocalEngineStatus(phase: .loading, message: "Loading local speech model…")
 
     // MARK: - Correction Learning
     // Nothing the user says is stored: no recordings, transcripts, or history.
-    // Audio and text live in memory only while a single dictation needs them.
+    // Audio and text live in memory only while a single dictation needs them;
+    // the latest text also stays in memory for Copy Last Dictation.
     @Published public var correctionLearningEnabled: Bool = false {
         didSet {
             UserDefaults.standard.set(correctionLearningEnabled, forKey: "presstowrite_correction_learning")
@@ -500,6 +504,8 @@ public final class AppState: ObservableObject {
         }
 
         clearFeedback()
+        // The previous dictation is no longer kept once the next one is released.
+        lastDictation = nil
         self.isRecording = false
         self.isProcessing = true
         self.statusMessage = "Transcribing..."
@@ -642,13 +648,14 @@ public final class AppState: ObservableObject {
                             self.statusMessage = "Copied! (Grant Accessibility to auto-insert)"
                         }
                     } else {
-                        // Nothing is kept for later, so without insertion the
-                        // clipboard is where this dictation's text is delivered.
+                        // Without insertion, the clipboard is where this
+                        // dictation's text is delivered.
                         TextInserter.shared.copyForManualPaste(cleanedText, keepInHistory: self.autoCopyToClipboard)
                         self.statusMessage = "Copied to Clipboard!"
                     }
 
                     self.hasPendingInsertion = needsManualInsertion
+                    self.lastDictation = cleanedText
                     // Visual and audio feedback
                     self.showSuccess = !self.hasPendingInsertion
                     if !self.hasPendingInsertion {
@@ -721,6 +728,17 @@ public final class AppState: ObservableObject {
             self.statusMessage = "Ready"
             self.feedbackResetTask = nil
         }
+    }
+
+    /// Copies the latest dictation, held in memory only, for a manual paste.
+    public func copyLastDictation() {
+        guard let text = lastDictation, !text.isEmpty else { return }
+        TextInserter.shared.copyForManualPaste(text, keepInHistory: autoCopyToClipboard)
+        hasPendingInsertion = false
+        statusMessage = "Copied to Clipboard!"
+        showSuccess = true
+        SoundEffects.shared.playSuccess()
+        scheduleFeedbackReset(after: 1_800_000_000)
     }
 
     /// Keeps the end of the latest insertion in memory for the continuation

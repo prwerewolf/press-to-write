@@ -50,7 +50,7 @@ Your microphone choice, vocabulary, and text replacements are created on your ow
 1. Wait for the local speech engine to show **Ready** in Settings → Speech Engine.
 2. Hold **Fn / Globe**, speak, and release to transcribe. Alternative hotkeys and toggle mode are available in Settings.
 3. Press **Escape** to discard a recording or cancel a pending dictation.
-4. Text is inserted only if the original app and focused control still own the cursor. If focus changes, the text is copied to the clipboard for you to paste instead. An app that exposes too little accessibility detail to tell two controls apart is checked at the application level only.
+4. Text is inserted only if the original app and focused control still own the cursor. If focus changes, the text is copied to the clipboard for you to paste instead. **Copy Last Dictation** in the menu bar, or the pill's Copy button, copies your latest dictation again. It is held in memory only, until your next dictation or until you quit. An app that exposes too little accessibility detail to tell two controls apart is checked at the application level only.
 
 The compact pill can be dragged to screen edges and remembers its monitor across restarts. Its waveform shows recording activity; loading and error states have explanatory tooltips.
 
@@ -74,7 +74,7 @@ The compact pill can be dragged to screen edges and remembers its monitor across
 - **Context-Aware Prompt Biasing:** Preceding text from the active document/focused control is automatically read via Accessibility and passed into Whisper's initial prompt, ensuring correct mid-sentence casing, sentence continuation, and document context without manual configuration.
 - **Smart Prefix Spacing:** Consecutive dictations into the same app/control automatically prepend a space, using accessibility cursor inspection with a 45-second fallback for smooth multi-sentence dictation.
 - **Hallucination & Sound Artifact Guard:** Filters hallucinated Whisper audio annotations (such as `[Music]`, `[Applause]`, `(laughter)`) on non-speech audio, quietly resetting to "No Speech Detected" rather than inserting ghost tokens.
-- **Nothing Saved:** No recording, transcript, or dictation history is ever written to disk, in any mode. If a microphone disconnects or the engine fails mid-dictation, that audio is discarded; dictate again.
+- **Nothing Saved:** No recording, transcript, or dictation history is ever written to disk, in any mode. Copy Last Dictation keeps only your latest text, in memory, until the next dictation or until you quit. If a microphone disconnects or the engine fails mid-dictation, that audio is discarded; dictate again.
 - **Accidental Click Guard:** Hotkey presses shorter than 0.25 seconds are silently discarded without transcription or error chimes.
 - **Auto-Adapt Style to Target App:** When enabled in Settings -> Writing, Press To Write automatically detects the frontmost application category using native macOS bundle IDs (Code for IDEs and terminals, casual punctuation for chat apps, and Prose for documents and notes).
 - **Code (Technical & Symbols):** Technical symbol formatting (such as `--`, `-`, `_`, `/`, backticks, `==`, `!=`, `->`, `=>`, `..`, `.`, `::`, `;`, `:`, `@`, `#`, `$`, `%`, `&`, `&&`, `|`, `||`, `++`, `*`, brackets, braces, parentheses), spoken casing macros (camelCase, snake_case, kebab-case, CONSTANT_CASE, PascalCase), lowercase command-name preservation, and trailing period suppression.

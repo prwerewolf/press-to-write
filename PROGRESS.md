@@ -6,6 +6,20 @@ Press To Write is a local-first push-to-talk speech dictation app for Apple Sili
 
 ### Recently Completed & Verified
 
+**Copy Last Dictation returns, memory only (November 2, 2026; verified on one Mac):**
+
+- At the owner's request, Copy Last Dictation is back in the status menu (with
+  its text preview) and as the pill's hover Copy button. `AppState.lastDictation`
+  holds only the latest text in memory: it is dropped when the next dictation is
+  released (an accidental tap under 0.25 seconds does not count), stays dropped if
+  that dictation fails, and is gone when the app quits. It is never saved, and its
+  clipboard copy is marked so clipboard history apps skip it unless "Keep Speech on
+  System Clipboard" is on.
+- Verified: all thirteen Swift suites and 91 Python tests, a release build, and five
+  mutations of the new behavior, each caught. The live microphone test was not
+  repeated because the owner was using the Mac; recording and storage code are
+  unchanged from the entry below.
+
 **Nothing you say is stored (November 1-2, 2026; verified on one Mac):**
 
 - Owner decision: the app must never keep anything dictated. Audio is now captured

@@ -16,6 +16,7 @@ only complete files already on disk. There is no cloud transcription API key.
 | Fast-mode audio queue and recognition state | Bounded memory and a private Unix socket; cleared when the session ends |
 | Diagnostic log (engine status, never dictated text) | `/tmp/presstowrite_daemon.log` |
 | Dictated text | Memory only until inserted or copied; none is kept as history |
+| Latest dictation, for Copy Last Dictation | Memory only; dropped when the next dictation is released and when the app quits |
 | End of the latest insertion, as context for a follow-up | Memory only; forgotten after 45 seconds |
 | Accepted learned spellings | App UserDefaults on this Mac; edit or clear in Settings → Writing |
 | Correction-learning snapshots and suggestions | Memory only; never written to logs or files |
@@ -40,8 +41,10 @@ dictation can start.
 
 Nothing you say is stored, in any mode. Audio is captured into memory, sent to
 the local engine over a private Unix socket, and released when that dictation
-finishes. There is no saved recording, transcript, history, or recovery file. A
-dictation interrupted by a microphone or engine failure is discarded. At launch
+finishes. Only the latest text stays in memory, for Copy Last Dictation, until the
+next dictation or until you quit. There is no saved recording, transcript,
+history, or recovery file. A dictation interrupted by a microphone or engine
+failure is discarded. At launch
 the app deletes the recording that earlier builds kept in Application Support
 (`last_recording.wav` and `rescue_metadata.json`) and any temporary recording a
 crash left behind. Applications you dictate into and the system clipboard can

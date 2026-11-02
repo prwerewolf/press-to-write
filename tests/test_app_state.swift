@@ -255,6 +255,7 @@ struct AppStateTests {
                      "Clipboard history managers are told to skip speech unless the user keeps it")
         precondition(engine.audio.last == recorder.capturedPCM, "The engine receives the recording from memory")
         precondition(!recorder.isRecording)
+        precondition(state.lastDictation == "Test dictation", "Copy Last holds the latest dictation in memory")
 
         // Feedback must not delay the next recording or reset its listening state.
         state.startRecording()
@@ -637,10 +638,46 @@ struct AppStateTests {
         precondition(state.resolveEffectiveStyle(baseStyle: .professional, target: mockTarget) == .professional, "Disabled auto-adaptive must preserve base style")
         state.autoAdaptiveFormatting = true
 
+        // Copy Last Dictation keeps only the latest text, in memory, until the next dictation.
+        InsertionTarget.mockCategory = .prose
+        state.autoInsertText = false
+        engine.result = .success("Remember the blue folder.")
+        state.startRecording()
+        state.stopRecordingAndTranscribe()
+        try await waitUntil { !state.isProcessing }
+        precondition(state.lastDictation == "Remember the blue folder.")
+        let copiesBeforeCopyLast = TextInserter.shared.manualCopies.count
+        state.copyLastDictation()
+        precondition(TextInserter.shared.manualCopies.count == copiesBeforeCopyLast + 1)
+        precondition(TextInserter.shared.manualCopies.last?.text == "Remember the blue folder.")
+        precondition(TextInserter.shared.manualCopies.last?.keepInHistory == false,
+                     "Copy Last must keep speech out of clipboard history")
+        precondition(state.statusMessage == "Copied to Clipboard!")
+        // An accidental tap is not a dictation, so the text survives it.
+        state.minRecordingDuration = 0.25
+        state.startRecording()
+        state.stopRecordingAndTranscribe()
+        precondition(state.lastDictation == "Remember the blue folder.", "An accidental tap must not drop the last dictation")
+        state.minRecordingDuration = 0
+        // Releasing the next dictation drops it at once, and a failed one leaves nothing.
+        engine.suspend = true
+        state.startRecording()
+        state.stopRecordingAndTranscribe()
+        precondition(state.lastDictation == nil, "The previous dictation is dropped when the next one is released")
+        try await waitUntil { engine.pending.count == 1 }
+        engine.pending.removeFirst().resume(throwing: NSError(
+            domain: "Test", code: 3, userInfo: [NSLocalizedDescriptionKey: "Engine failure"]))
+        try await waitUntil { !state.isProcessing }
+        engine.suspend = false
+        precondition(state.lastDictation == nil, "A failed dictation leaves nothing to copy")
+        let copiesAfterDrop = TextInserter.shared.manualCopies.count
+        state.copyLastDictation()
+        precondition(TextInserter.shared.manualCopies.count == copiesAfterDrop, "A dropped dictation can never be copied again")
+
         // Nothing dictated reaches saved preferences, and no history setting exists.
         let dictated = ["Test dictation", "Current result", "Canceled result", "um, asteria period",
                         "latest project plan", "reaching the conclusion", "Send this to", "Call Zeph",
-                        "First sentence here", "Second sentence"]
+                        "First sentence here", "Second sentence", "Remember the blue folder"]
         for (key, value) in UserDefaults.standard.allValues {
             precondition(!key.contains("retention") && !key.contains("history"), "No history setting may be saved: \(key)")
             let saved = String(describing: value)
@@ -649,6 +686,6 @@ struct AppStateTests {
             }
         }
 
-        print("AppState regressions passed: memory-only dictation, clipboard delivery and fallback, corrections, remembered vocabulary, native focus changes, expiring context, cancellation, undo failure, and auto-adaptive writing styles.")
+        print("AppState regressions passed: memory-only dictation, memory-only Copy Last, clipboard delivery and fallback, corrections, remembered vocabulary, native focus changes, expiring context, cancellation, undo failure, and auto-adaptive writing styles.")
     }
 }

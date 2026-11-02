@@ -4,7 +4,7 @@ import SwiftUI
 import Combine
 
 @MainActor
-public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
     public var statusItem: NSStatusItem?
     public var pillPanel: FloatingPillPanel?
 
@@ -205,6 +205,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         dictateItem.target = self
         menu.addItem(dictateItem)
 
+        let copyLastItem = NSMenuItem(title: "Copy Last Dictation", action: #selector(copyLastDictationAction), keyEquivalent: "c")
+        copyLastItem.target = self
+        menu.addItem(copyLastItem)
+
         // Transcription Style Submenu
         let styleMenuItem = NSMenuItem(title: "Style", action: nil, keyEquivalent: "")
         let styleSubmenu = NSMenu()
@@ -255,6 +259,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         quitItem.target = self
         menu.addItem(quitItem)
 
+        menu.delegate = self
         item.menu = menu
         self.statusItem = item
 
@@ -268,8 +273,25 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         if !statusItem.isVisible { statusItem.isVisible = true }
     }
 
+    public func menuWillOpen(_ menu: NSMenu) {
+        guard let copyItem = menu.items.first(where: { $0.action == #selector(copyLastDictationAction) }) else { return }
+        let lastText = (AppState.shared.lastDictation ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if lastText.isEmpty {
+            copyItem.title = "Copy Last Dictation (None)"
+            copyItem.isEnabled = false
+        } else {
+            let preview = lastText.count > 25 ? String(lastText.prefix(22)) + "..." : lastText
+            copyItem.title = "Copy: \"\(preview)\""
+            copyItem.isEnabled = true
+        }
+    }
+
     @objc private func toggleDictation() {
         AppState.shared.toggleRecording()
+    }
+
+    @objc private func copyLastDictationAction() {
+        AppState.shared.copyLastDictation()
     }
 
     @objc private func selectStyle(_ sender: NSMenuItem) {
