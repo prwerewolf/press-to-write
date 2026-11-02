@@ -254,7 +254,7 @@ struct EngineSettingsTab: View {
                         .foregroundColor(.secondary)
                 }
 
-                Text("Both modes use installed files only. Recordings, vocabulary, and corrections stay on this Mac. Rescued audio uses Whisper for accuracy.")
+                Text("Both modes use installed files only. Your audio is processed in memory on this Mac and is never saved.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             } header: {
@@ -265,7 +265,7 @@ struct EngineSettingsTab: View {
     }
 }
 
-// MARK: - Privacy & Retention Tab
+// MARK: - Privacy Tab
 struct PrivacySettingsTab: View {
     @ObservedObject var appState = AppState.shared
 
@@ -273,7 +273,7 @@ struct PrivacySettingsTab: View {
         Form {
             Section {
                 Toggle("Auto-Insert Text at Cursor", isOn: $appState.autoInsertText)
-                Text("Automatically pastes text directly where your cursor is. Uses transient markers and automatic clipboard restoration (Whisperflow-style) so your clipboard history stays clean.")
+                Text("Automatically pastes text directly where your cursor is. Uses transient markers and automatic clipboard restoration (Whisperflow-style) so your clipboard history stays clean. When off, each dictation is copied to the clipboard for you to paste.")
                     .font(.caption)
                     .foregroundColor(.secondary)
 
@@ -289,21 +289,14 @@ struct PrivacySettingsTab: View {
             Divider()
 
             Section {
-                Picker("History Retention", selection: $appState.historyRetention) {
-                    ForEach(HistoryRetention.allCases) { policy in
-                        Text(policy.rawValue).tag(policy)
-                    }
-                }
-                .pickerStyle(.radioGroup)
-
                 HStack(spacing: 8) {
                     Image(systemName: "lock.shield.fill")
                         .foregroundColor(.green)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Zero Permanent Storage Policy")
+                        Text("Nothing You Say Is Saved")
                             .font(.caption)
                             .fontWeight(.semibold)
-                        Text("Temporary recordings are deleted after processing or cancellation. Session history stays in memory on this Mac.")
+                        Text("Audio stays in memory only while it is transcribed, and the text only until it is inserted or copied. No recordings, transcripts, or history are written to disk.")
                             .font(.caption2)
                             .foregroundColor(.secondary)
                     }
@@ -313,27 +306,8 @@ struct PrivacySettingsTab: View {
                 .cornerRadius(6)
                 .padding(.top, 4)
             } header: {
-                Text("Data & Privacy Controls")
+                Text("Your Speech")
                     .fontWeight(.semibold)
-            }
-
-            Divider()
-
-            Section {
-                HStack {
-                    VStack(alignment: .leading) {
-                        Text("Purge Session History")
-                            .fontWeight(.medium)
-                        Text("Instantly delete all stored dictations from memory.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    Spacer()
-                    Button("Purge Now", role: .destructive) {
-                        appState.clearHistory()
-                    }
-                    .buttonStyle(.bordered)
-                }
             }
         }
     }

@@ -43,14 +43,14 @@ assets without downloading. Optional setup does not change your selected mode.
 
 Grant **Microphone** and **Accessibility** permission to Press To Write when prompted. Each Mac needs its own permissions. In System Settings → Keyboard, set **“Press 🌐 key to:” → “Do Nothing”** if using Fn / Globe. Open Settings → Microphone, select an available input, and test its levels. Wait for Settings → Speech Engine to show **Ready**, then try a short dictation in a text editor.
 
-Your microphone choice, vocabulary, text replacements, history, and recordings are created on your own Mac. They are not bundled with the source download.
+Your microphone choice, vocabulary, and text replacements are created on your own Mac. They are not bundled with the source download. Press To Write never saves your recordings or what you dictate.
 
 ## Daily use
 
 1. Wait for the local speech engine to show **Ready** in Settings → Speech Engine.
 2. Hold **Fn / Globe**, speak, and release to transcribe. Alternative hotkeys and toggle mode are available in Settings.
 3. Press **Escape** to discard a recording or cancel a pending dictation.
-4. Text is inserted only if the original app and focused control still own the cursor. If focus changes, your result remains available through **Copy Last Dictation** in the menu bar or the pill's Copy button. An app that exposes too little accessibility detail to tell two controls apart is checked at the application level only.
+4. Text is inserted only if the original app and focused control still own the cursor. If focus changes, the text is copied to the clipboard for you to paste instead. An app that exposes too little accessibility detail to tell two controls apart is checked at the application level only.
 
 The compact pill can be dragged to screen edges and remembers its monitor across restarts. Its waveform shows recording activity; loading and error states have explanatory tooltips.
 
@@ -61,20 +61,20 @@ The compact pill can be dragged to screen edges and remembers its monitor across
   English streaming on Metal. Fast mode decodes during recording and flushes the
   final words on release. Mode changes are disabled during dictation. Both modes
   use custom and remembered vocabulary; Whisper also uses document context and
-  its token-budgeted prompt. Fast output can have less punctuation. Rescued audio
-  always uses Whisper for accuracy. Missing fast files produce an installation
-  message; dictation never downloads files or selects a cloud fallback.
+  its token-budgeted prompt. Fast output can have less punctuation. Missing fast
+  files produce an installation message; dictation never downloads files or
+  selects a cloud fallback.
 - **Launch at Login:** Option in Settings → General to start Press To Write automatically on macOS login via `SMAppService`.
 - **Microphone:** Choose the system default or a specific input. The level-meter test runs only while enabled, saves no recording, and stops when Settings closes or dictation begins. An unavailable saved microphone produces a clear error instead of silently switching inputs. Only System Default falls back, to the built-in microphone and then any other input, when the default input cannot start.
 - **Custom vocabulary & Text Replacements:** Comma-separated vocabulary terms guide local recognition. The Text Replacements editor in Settings → Writing allows defining voice snippet macros (`phrase -> replacement` or `phrase = replacement`, e.g., `my email -> name@example.com`).
-- **Correction Learning:** Enable **Suggest spelling corrections** in Settings → Writing. After a successful paste, the app briefly checks that same accessible, non-secure field for spelling edits. A **Remember this spelling?** panel offers Remember and Dismiss without activating the app. Only words you explicitly remember are saved locally; edit, forget, or clear them under Learned Vocabulary. Learning is off by default and pauses in Incognito. Unsupported controls and large documents are skipped; the feature does not retrain the model.
+- **Correction Learning:** Enable **Suggest spelling corrections** in Settings → Writing. After a successful paste, the app briefly checks that same accessible, non-secure field for spelling edits. A **Remember this spelling?** panel offers Remember and Dismiss without activating the app. Only words you explicitly remember are saved locally; edit, forget, or clear them under Learned Vocabulary. Learning is off by default. Unsupported controls and large documents are skipped; the feature does not retrain the model.
 - **Prompt Budgeting & Vocabulary Recovery:** In Whisper, recent document context and complete vocabulary entries share the loaded model's actual token budget. Suspicious vocabulary-list echoes get one local retry without context or vocabulary hints. Short dictations containing saved names remain valid; an intentional spoken list can be confirmed by the retry.
 - **Keyboard Layout Support:** Paste and voice undo resolve the Command shortcut through the current keyboard layout, including input-method fallback to an available ASCII layout. An unresolved shortcut leaves the transcript available for manual paste, and unavailable undo reports how to use the app's Edit menu.
 - **Voice Correction & Undo ("Scratch That"):** Mid-sentence corrections like *"meeting at four, scratch that, five"* replace the abandoned phrase. Speaking *"scratch that"*, *"cancel that"*, or *"undo that"* as a standalone utterance triggers a native `Cmd+Z` undo keystroke with visual feedback on the pill.
 - **Context-Aware Prompt Biasing:** Preceding text from the active document/focused control is automatically read via Accessibility and passed into Whisper's initial prompt, ensuring correct mid-sentence casing, sentence continuation, and document context without manual configuration.
 - **Smart Prefix Spacing:** Consecutive dictations into the same app/control automatically prepend a space, using accessibility cursor inspection with a 45-second fallback for smooth multi-sentence dictation.
 - **Hallucination & Sound Artifact Guard:** Filters hallucinated Whisper audio annotations (such as `[Music]`, `[Applause]`, `(laughter)`) on non-speech audio, quietly resetting to "No Speech Detected" rather than inserting ghost tokens.
-- **Audio Rescue & Recovery:** If an audio device disconnects mid-speech or an unexpected engine error occurs, Press To Write preserves the raw audio recording in `~/Library/Application Support/Press To Write/last_recording.wav`. The **Transcribe Last Recording** menu item in the macOS status bar allows immediate one-click recovery of the dictated speech directly to your clipboard.
+- **Nothing Saved:** No recording, transcript, or dictation history is ever written to disk, in any mode. If a microphone disconnects or the engine fails mid-dictation, that audio is discarded; dictate again.
 - **Accidental Click Guard:** Hotkey presses shorter than 0.25 seconds are silently discarded without transcription or error chimes.
 - **Auto-Adapt Style to Target App:** When enabled in Settings -> Writing, Press To Write automatically detects the frontmost application category using native macOS bundle IDs (Code for IDEs and terminals, casual punctuation for chat apps, and Prose for documents and notes).
 - **Code (Technical & Symbols):** Technical symbol formatting (such as `--`, `-`, `_`, `/`, backticks, `==`, `!=`, `->`, `=>`, `..`, `.`, `::`, `;`, `:`, `@`, `#`, `$`, `%`, `&`, `&&`, `|`, `||`, `++`, `*`, brackets, braces, parentheses), spoken casing macros (camelCase, snake_case, kebab-case, CONSTANT_CASE, PascalCase), lowercase command-name preservation, and trailing period suppression.
@@ -82,23 +82,22 @@ The compact pill can be dragged to screen edges and remembers its monitor across
 - **Natural:** Conservative removal of clear hesitations and obvious repetition loops, preserving wording, casing, and literal punctuation words.
 - **Raw:** The recognizer's output without text cleanup, vocabulary replacements, or formatting. Vocabulary still guides recognition itself.
 - **Punctuation Hygiene:** All transcription styles strictly convert Unicode em and en dashes to standard ASCII hyphens.
-- **Clipboard:** Existing transient clipboard markers and automatic restoration are used for insertion. “Keep Speech on System Clipboard” retains copied speech when enabled. If Accessibility is unavailable, the existing copy-to-clipboard fallback remains available.
-- **History:** Session Only is the default. Incognito disables history; rolling limits keep the last 10 or 50 entries in memory. History is not persisted across app restarts.
+- **Clipboard:** Existing transient clipboard markers and automatic restoration are used for insertion. “Keep Speech on System Clipboard” retains copied speech when enabled. If Accessibility is unavailable, the existing copy-to-clipboard fallback remains available. With Auto-Insert off, each dictation is copied to the clipboard.
 
-Temporary recording files in `/tmp` are removed after processing, while the most recent recording is securely archived in Application Support for recovery. Audio tests only compute levels in memory. Text deliberately copied or inserted into another application follows that application's own storage/sync behavior.
+Recordings never touch the disk. Audio is captured into memory, sent to the local engine over a private Unix socket, and released when that dictation finishes. The end of the latest inserted text stays in memory for up to 45 seconds as context for a quick follow-up dictation, then is forgotten. At launch the app deletes the saved recording that builds before November 2026 kept (`last_recording.wav` and `rescue_metadata.json`) and any temporary recording a crash left behind. Audio tests only compute levels in memory. Text deliberately copied or inserted into another application follows that application's own storage/sync behavior.
 
 ## Offline model setup
 
 Press To Write uses the Python environment created in `~/Library/Application Support/Press To Write/venv` and already-downloaded MLX Whisper files. Older installations can still use an existing `.venv` as a fallback. Setup preserves app preferences and does not copy your checkout’s virtual environment. The engine loads and warms the actual model before reporting Ready.
 
-Press To Write records 16 kHz mono PCM16 WAV. The local daemon decodes that format directly with Python and NumPy before recognition, so `ffmpeg` is not needed at runtime. This also works when a Finder-launched app does not inherit Homebrew's `PATH`.
+Press To Write captures 16 kHz mono PCM16 into memory and sends it to the local daemon over its private socket, where NumPy converts it for recognition. No audio file is written, and `ffmpeg` is not needed at runtime. This also works when a Finder-launched app does not inherit Homebrew's `PATH`.
 
 Fast mode sends the same converted PCM over a private Unix socket to a separate,
 resident Metal worker. The audio tap only fills a bounded queue; socket writes
 and inference run off the audio and main threads. Release sends all accepted
 frames before flushing, including a short final frame. Escape, device failure,
-an interrupted connection, or an audio backlog discard the stream, and the
-usual recovery recording remains available after a transcription failure.
+an interrupted connection, or an audio backlog discard the stream. Fast mode
+keeps no copy of the audio, so nothing remains to recover afterward.
 Workers accept installed local paths only; no HTTP service is started. The
 optional runtime and model live under Application Support's `fast` directory.
 `PRESSTOWRITE_FAST_DIR` can select an existing installation when launching the
@@ -145,7 +144,7 @@ If an older clone predates a published history cleanup, download or clone the cl
 
 ## Privacy and troubleshooting
 
-The last audio recording and its recovery metadata stay in `~/Library/Application Support/Press To Write/`. Dictation history is in memory and clears on exit; vocabulary and settings are stored in the app’s macOS preferences. The daemon writes a local diagnostic log to `/tmp/presstowrite_daemon.log`. Do not upload these files, your preferences, or real dictated text in an issue. See [PRIVACY.md](PRIVACY.md).
+No recordings, transcripts, or dictation history are stored. Vocabulary and settings are stored in the app’s macOS preferences. The daemon writes a local diagnostic log of engine status, never dictated text, to `/tmp/presstowrite_daemon.log`. Do not upload these files, your preferences, or real dictated text in an issue. See [PRIVACY.md](PRIVACY.md).
 
 - **Speech engine unavailable:** Run setup again, confirm Python is native arm64, and check that the local model has `config.json` and nonempty weight files. The app will never download a missing model itself.
 - **Microphone unavailable:** Choose an input currently connected to this Mac; devices and permissions differ between machines.

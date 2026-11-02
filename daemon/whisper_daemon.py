@@ -22,19 +22,20 @@ import fcntl
 import multiprocessing
 import queue
 import stat
-import wave
 import importlib
 import unicodedata
 from concurrent.futures import Future
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from nemotron_engine import FastInferenceWorker
+from nemotron_engine import FastInferenceWorker, receive_exact
 
 SOCKET_PATH = os.environ.get("PRESSTOWRITE_SOCKET", "/tmp/presstowrite.sock")
 DEFAULT_MODEL = "mlx-community/whisper-large-v3-turbo"
 FALLBACK_MODEL = "mlx-community/whisper-base.en"
-PROTOCOL_VERSION = 3
+PROTOCOL_VERSION = 4
 MAX_REQUEST_BYTES = 65536
+# One hour of 16 kHz mono PCM16. Audio arrives over the socket and stays in memory.
+MAX_AUDIO_BYTES = 16000 * 2 * 60 * 60
 SCRIPT_SHA256 = hashlib.sha256(b"".join(
     (Path(__file__).parent / name).read_bytes()
     for name in ("whisper_daemon.py", "nemotron_engine.py", "gguf_metadata.py")
@@ -328,29 +329,25 @@ def is_vocabulary_echo(text, terms):
     return False
 
 
-def load_recorded_audio(audio_path):
-    """Decode Press To Write's 16 kHz mono PCM16 WAV without invoking ffmpeg."""
-    with wave.open(audio_path, "rb") as recording:
-        if (recording.getnchannels() != 1 or recording.getframerate() != 16000
-                or recording.getsampwidth() != 2 or recording.getcomptype() != "NONE"):
-            raise ValueError("Unsupported recording format; expected 16 kHz mono PCM16 WAV")
-        pcm = recording.readframes(recording.getnframes())
-    if not pcm:
+def pcm16_samples(pcm):
+    """Scale the app's in-memory 16 kHz mono PCM16 audio for MLX Whisper."""
+    if not isinstance(pcm, (bytes, bytearray)) or not pcm:
         raise ValueError("The recording contains no audio samples")
+    if len(pcm) % 2:
+        raise ValueError("Unsupported recording format; expected 16 kHz mono PCM16")
 
     import numpy as np
-    # WAV PCM is little-endian. astype makes a writable float32 copy before scaling.
+    # PCM16 is little-endian. astype makes a writable float32 copy before scaling.
     return np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
 
 
-def transcribe_file(audio_path: str, vocabulary=None, style="natural", context=None) -> dict:
+def transcribe_pcm(pcm, vocabulary=None, style="natural", context=None) -> dict:
+    """Recognize audio held in memory. No recording or transcript touches disk."""
     if style not in ("natural", "professional", "raw", "code"):
         return {"error": "Unknown writing style"}
     status = engine_status()
     if status["status"] != "ready":
         return {"error": status["message"]}
-    if not isinstance(audio_path, str) or not os.path.isfile(audio_path):
-        return {"error": "The temporary audio recording could not be found"}
 
     start_time = time.monotonic()
     try:
@@ -360,7 +357,7 @@ def transcribe_file(audio_path: str, vocabulary=None, style="natural", context=N
             if not active_model_path or not complete_model_folder(active_model_path):
                 raise RuntimeError("The downloaded speech model is missing. Restart Press To Write after restoring it.")
             prompt, sent_terms = build_prompt_plan(vocabulary, context=context)
-            audio = load_recorded_audio(audio_path)
+            audio = pcm16_samples(pcm)
             options = dict(
                 path_or_hf_repo=active_model_path, fp16=True, verbose=None,
                 condition_on_previous_text=False, compression_ratio_threshold=2.4,
@@ -370,7 +367,7 @@ def transcribe_file(audio_path: str, vocabulary=None, style="natural", context=N
             recovered = is_vocabulary_echo(result.get("text", ""), sent_terms)
             if recovered:
                 # Reuse the samples once, without any prompt. The worker still
-                # owns cancellation, and the WAV remains available until finally.
+                # owns cancellation of this in-memory request.
                 # Never discard speech just because it uses dictionary words:
                 # an independent decode can confirm an intentional spoken list.
                 result = mlx_whisper.transcribe(audio, initial_prompt=None, **options)
@@ -386,19 +383,6 @@ def transcribe_file(audio_path: str, vocabulary=None, style="natural", context=N
         }
     except Exception as error:
         return {"error": str(error)}
-    finally:
-        # Ephemeral recordings are removed even when recognition fails.
-        try:
-            os.remove(audio_path)
-        except OSError:
-            pass
-
-
-def _remove_recording(path):
-    try:
-        os.remove(path)
-    except OSError:
-        pass
 
 
 def inference_process(pipe):
@@ -411,11 +395,13 @@ def inference_process(pipe):
             message = pipe.recv()
             if message.get("action") != "transcribe":
                 continue
-            result = transcribe_file(
-                message["path"], message.get("vocabulary", []), message.get("style", "natural"),
+            result = transcribe_pcm(
+                message["pcm"], message.get("vocabulary", []), message.get("style", "natural"),
                 context=message.get("context")
             )
             pipe.send({"kind": "result", "request_id": message["request_id"], "result": result})
+            # Release this dictation's audio, context and text before waiting for the next.
+            message = result = None
     except (EOFError, BrokenPipeError):
         pass
     finally:
@@ -436,16 +422,15 @@ class IsolatedInferenceWorker:
         self.thread = threading.Thread(target=self._run, name="presstowrite-inference-supervisor", daemon=True)
         self.thread.start()
 
-    def submit(self, request_id, path, vocabulary, style, context=None):
+    def submit(self, request_id, pcm, vocabulary, style, context=None):
         future = Future()
-        job = {"request_id": request_id, "path": path, "vocabulary": vocabulary,
+        job = {"request_id": request_id, "pcm": pcm, "vocabulary": vocabulary,
                "style": style, "context": context, "future": future, "cancelled": threading.Event()}
         with self.lock:
             if request_id in self.jobs:
                 raise ValueError("A transcription with that request ID is already running")
             if request_id in self.cancelled_ids:
                 self.cancelled_ids.pop(request_id)
-                _remove_recording(path)
                 future.set_result({"error": "Dictation canceled"})
                 return future
             self.jobs[request_id] = job
@@ -478,6 +463,8 @@ class IsolatedInferenceWorker:
         self.thread.join(timeout=2)
 
     def _finish(self, job, result):
+        # Release the audio as soon as its request is settled.
+        job["pcm"] = None
         with self.lock:
             self.jobs.pop(job["request_id"], None)
             if not job["future"].done():
@@ -526,6 +513,7 @@ class IsolatedInferenceWorker:
                             elif message.get("kind") == "result" and active_job is not None:
                                 self._finish(active_job, message["result"])
                                 active_job = None
+                            message = None
                     except (EOFError, BrokenPipeError, OSError):
                         break
                     if active_job is None:
@@ -534,14 +522,12 @@ class IsolatedInferenceWorker:
                         except queue.Empty:
                             continue
                         if job["cancelled"].is_set():
-                            _remove_recording(job["path"])
                             self._finish(job, {"error": "Dictation canceled"})
                             continue
                         with engine_lock:
                             ready = is_engine_ready
                             unavailable = engine_load_error
                         if unavailable:
-                            _remove_recording(job["path"])
                             self._finish(job, {"error": unavailable})
                         elif not ready:
                             self.pending.put(job)
@@ -549,10 +535,10 @@ class IsolatedInferenceWorker:
                             try:
                                 parent_pipe.send({
                                     "action": "transcribe", "request_id": job["request_id"],
-                                    "path": job["path"], "vocabulary": job["vocabulary"], "style": job["style"],
+                                    "pcm": job["pcm"], "vocabulary": job["vocabulary"], "style": job["style"],
                                     "context": job.get("context"),
                                 })
-                                active_job = job
+                                active_job, job = job, None
                             except (BrokenPipeError, OSError):
                                 self.pending.put(job)
                                 break
@@ -568,7 +554,6 @@ class IsolatedInferenceWorker:
                     if self.process is process:
                         self.process = None
                 if active_job is not None:
-                    _remove_recording(active_job["path"])
                     self._finish(active_job, {"error": "Dictation canceled" if active_job["cancelled"].is_set()
                                              else "The local speech worker stopped unexpectedly"})
             if not self.stopping.is_set():
@@ -614,22 +599,35 @@ def remove_stale_socket():
         pass
 
 
+def read_request_audio(conn, req, already_read):
+    """Read the PCM16 body that follows a transcription header, into memory only."""
+    size = req.get("audio_bytes")
+    if (not isinstance(size, int) or isinstance(size, bool) or size <= 0
+            or size > MAX_AUDIO_BYTES or size % 2):
+        raise ValueError("A transcription needs 16 kHz mono PCM16 audio of at most one hour")
+    if len(already_read) > size:
+        raise ValueError("The transcription request has more audio than it declared")
+    return already_read + receive_exact(conn, size - len(already_read))
+
+
 def handle_connection(conn, worker, fast_worker=None):
     try:
         conn.settimeout(5)
         data = b""
         while b"\n" not in data:
             # Streaming clients wait for the begin acknowledgement before sending
-            # PCM, so this bounded read cannot consume a binary audio frame.
+            # PCM. A transcription body may follow its header at once; any bytes
+            # read past the newline belong to that body.
             chunk = conn.recv(4096)
             if not chunk:
                 break
             data += chunk
-            if len(data) > MAX_REQUEST_BYTES:
+            if b"\n" not in data and len(data) > MAX_REQUEST_BYTES:
                 raise ValueError("Daemon request is too large")
         if not data.strip():
             return
-        req = json.loads(data.split(b"\n", 1)[0])
+        header, _, body = data.partition(b"\n")
+        req = json.loads(header)
         action = req.get("action", "")
         if action == "ping":
             response = engine_status()
@@ -642,9 +640,10 @@ def handle_connection(conn, worker, fast_worker=None):
             request_id = req.get("request_id")
             if not isinstance(request_id, str) or not re.fullmatch(r"[0-9a-fA-F-]{36}", request_id):
                 raise ValueError("A valid transcription request ID is required")
+            pcm = read_request_audio(conn, req, body)
             # Ping and cancel never wait behind the single MLX worker.
             response = worker.submit(
-                request_id, req.get("path", ""), req.get("vocabulary", []), req.get("style", "natural"),
+                request_id, pcm, req.get("vocabulary", []), req.get("style", "natural"),
                 context=req.get("context")
             ).result()
         elif action == "cancel":

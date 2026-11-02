@@ -10,7 +10,6 @@ import threading
 import types
 import time
 import uuid
-import wave
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import unittest
@@ -21,6 +20,9 @@ DAEMON_PATH = Path(__file__).resolve().parents[1] / "daemon" / "whisper_daemon.p
 spec = importlib.util.spec_from_file_location("whisper_daemon", DAEMON_PATH)
 daemon = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(daemon)
+
+# Two synthetic PCM16 samples; dictation audio reaches the daemon only as bytes.
+SYNTHETIC_PCM = b"\x01\x00\x02\x00"
 
 
 class RepetitionCleanupTests(unittest.TestCase):
@@ -203,12 +205,9 @@ class EngineTests(unittest.TestCase):
             "segments": [{"text": "must never replace raw output", "compression_ratio": 10}],
         }
         self.engine.transcribe.side_effect = error
-        with mock.patch.object(daemon.os.path, "isfile", return_value=True), \
-                mock.patch.object(daemon, "complete_model_folder", return_value=True), \
-                mock.patch.object(daemon, "load_recorded_audio", return_value="synthetic samples"), \
-                mock.patch.object(daemon.os, "remove") as remove:
-            result = daemon.transcribe_file("/temporary/audio.wav", vocabulary, style, context=context)
-        remove.assert_called_once_with("/temporary/audio.wav")
+        with mock.patch.object(daemon, "complete_model_folder", return_value=True), \
+                mock.patch.object(daemon, "pcm16_samples", return_value="synthetic samples"):
+            result = daemon.transcribe_pcm(SYNTHETIC_PCM, vocabulary, style, context=context)
         return result
 
     def test_vocabulary_is_sent_to_recognizer_as_initial_prompt(self):
@@ -231,7 +230,7 @@ class EngineTests(unittest.TestCase):
         self.assertTrue(result["success"])
         self.assertEqual(self.engine.transcribe.call_args.kwargs["initial_prompt"], "Continuing this thought,")
 
-    def test_pcm16_wav_is_scaled_and_passed_as_samples_instead_of_path(self):
+    def test_in_memory_pcm16_is_scaled_and_passed_as_samples(self):
         class FakeSamples:
             def __init__(self, values):
                 self.values = values
@@ -251,16 +250,8 @@ class EngineTests(unittest.TestCase):
         )
         self.warm_engine()
         self.engine.transcribe.reset_mock()
-        with tempfile.TemporaryDirectory() as temporary:
-            path = Path(temporary) / "speech.wav"
-            with wave.open(str(path), "wb") as recording:
-                recording.setnchannels(1)
-                recording.setsampwidth(2)
-                recording.setframerate(16000)
-                recording.writeframes(pcm)
-            with mock.patch.object(daemon, "complete_model_folder", return_value=True):
-                result = daemon.transcribe_file(str(path))
-            self.assertFalse(path.exists())
+        with mock.patch.object(daemon, "complete_model_folder", return_value=True):
+            result = daemon.transcribe_pcm(pcm)
 
         self.assertTrue(result["success"])
         self.numpy.frombuffer.assert_called_once_with(pcm, dtype="<i2")
@@ -275,7 +266,7 @@ class EngineTests(unittest.TestCase):
                 result = self.transcribe(original, style=style)
                 self.assertEqual(result["text"], original)
 
-    def test_inference_failure_deletes_recording_without_downloading_fallback(self):
+    def test_inference_failure_never_downloads_a_fallback(self):
         result = self.transcribe("", error=RuntimeError("inference failed"))
         self.assertEqual(result["error"], "inference failed")
         self.engine.transcribe.assert_called_once()
@@ -283,10 +274,8 @@ class EngineTests(unittest.TestCase):
     def test_missing_cached_files_never_enter_model_loader(self):
         self.warm_engine()
         self.engine.transcribe.reset_mock()
-        with mock.patch.object(daemon.os.path, "isfile", return_value=True), \
-                mock.patch.object(daemon, "complete_model_folder", return_value=False), \
-                mock.patch.object(daemon.os, "remove"):
-            result = daemon.transcribe_file("/temporary/audio.wav")
+        with mock.patch.object(daemon, "complete_model_folder", return_value=False):
+            result = daemon.transcribe_pcm(SYNTHETIC_PCM)
         self.assertIn("downloaded speech model is missing", result["error"])
         self.engine.transcribe.assert_not_called()
 
@@ -299,14 +288,12 @@ class EngineTests(unittest.TestCase):
         threads = []
         self.engine.transcribe.side_effect = lambda *args, **kwargs: threads.append(threading.get_ident()) or {"text": "hello"}
         with mock.patch.object(daemon, "local_model_candidates", return_value=[("cached-model", "/local/model")]), \
-                mock.patch.object(daemon.os.path, "isfile", return_value=True), \
                 mock.patch.object(daemon, "complete_model_folder", return_value=True), \
-                mock.patch.object(daemon, "load_recorded_audio", return_value="synthetic samples"), \
-                mock.patch.object(daemon.os, "remove"), \
+                mock.patch.object(daemon, "pcm16_samples", return_value="synthetic samples"), \
                 mock.patch.object(daemon, "print", create=True), \
                 ThreadPoolExecutor(max_workers=1) as worker:
             worker.submit(daemon.load_engine_background).result(timeout=2)
-            result = worker.submit(daemon.transcribe_file, "/temporary/audio.wav").result(timeout=2)
+            result = worker.submit(daemon.transcribe_pcm, SYNTHETIC_PCM).result(timeout=2)
         self.assertTrue(result["success"])
         self.assertEqual(len(threads), 2)
         self.assertEqual(len(set(threads)), 1)
@@ -327,46 +314,63 @@ class EngineTests(unittest.TestCase):
         self.engine.transcribe.side_effect = [
             {"text": "Lumora, Zephira, Acmetron"}, {"text": "Send the proposal to Lumora."}
         ]
-        with mock.patch.object(daemon.os.path, "isfile", return_value=True), \
-                mock.patch.object(daemon, "complete_model_folder", return_value=True), \
-                mock.patch.object(daemon, "load_recorded_audio", return_value="same samples"), \
-                mock.patch.object(daemon.os, "remove") as remove:
-            result = daemon.transcribe_file("/temporary/audio.wav", ["Lumora", "Zephira", "Acmetron"], context="Earlier sentence")
+        with mock.patch.object(daemon, "complete_model_folder", return_value=True), \
+                mock.patch.object(daemon, "pcm16_samples", return_value="same samples"):
+            result = daemon.transcribe_pcm(SYNTHETIC_PCM, ["Lumora", "Zephira", "Acmetron"], context="Earlier sentence")
         self.assertEqual(result["text"], "Send the proposal to Lumora.")
         self.assertTrue(result["vocabulary_recovery"])
         self.assertEqual(self.engine.transcribe.call_count, 2)
         self.assertIsNone(self.engine.transcribe.call_args.kwargs["initial_prompt"])
         self.assertEqual([call.args[0] for call in self.engine.transcribe.call_args_list], ["same samples"] * 2)
-        remove.assert_called_once()
 
     def test_prompt_free_retry_preserves_intentionally_spoken_dictionary_list(self):
         self.warm_engine()
         self.engine.transcribe.reset_mock()
         self.engine.transcribe.return_value = {"text": "Lumora, Zephira, Acmetron"}
-        with mock.patch.object(daemon.os.path, "isfile", return_value=True), \
-                mock.patch.object(daemon, "complete_model_folder", return_value=True), \
-                mock.patch.object(daemon, "load_recorded_audio", return_value="samples"), \
-                mock.patch.object(daemon.os, "remove"):
-            result = daemon.transcribe_file("/temporary/audio.wav", ["Lumora", "Zephira", "Acmetron"], style="raw")
+        with mock.patch.object(daemon, "complete_model_folder", return_value=True), \
+                mock.patch.object(daemon, "pcm16_samples", return_value="samples"):
+            result = daemon.transcribe_pcm(SYNTHETIC_PCM, ["Lumora", "Zephira", "Acmetron"], style="raw")
         self.assertEqual(result["text"], "Lumora, Zephira, Acmetron")
         self.assertEqual(self.engine.transcribe.call_count, 2, "Recovery must not loop")
 
-    def test_recovery_silence_returns_no_text_and_recovery_failure_deletes_audio(self):
+    def test_recovery_silence_returns_no_text_and_recovery_failure_reports_error(self):
         for retry in ({"text": ""}, RuntimeError("retry failed")):
             with self.subTest(retry=retry):
                 self.warm_engine()
                 self.engine.transcribe.reset_mock()
                 self.engine.transcribe.side_effect = [{"text": "Lumora Lumora Lumora"}, retry]
-                with mock.patch.object(daemon.os.path, "isfile", return_value=True), \
-                        mock.patch.object(daemon, "complete_model_folder", return_value=True), \
-                        mock.patch.object(daemon, "load_recorded_audio", return_value="samples"), \
-                        mock.patch.object(daemon.os, "remove") as remove:
-                    result = daemon.transcribe_file("/temporary/audio.wav", ["Lumora"])
+                with mock.patch.object(daemon, "complete_model_folder", return_value=True), \
+                        mock.patch.object(daemon, "pcm16_samples", return_value="samples"):
+                    result = daemon.transcribe_pcm(SYNTHETIC_PCM, ["Lumora"])
                 if isinstance(retry, Exception): self.assertEqual(result["error"], "retry failed")
                 else: self.assertEqual(result["text"], "")
                 self.assertEqual(self.engine.transcribe.call_count, 2)
-                remove.assert_called_once()
                 self.engine.transcribe.side_effect = None
+
+
+    def test_transcription_never_opens_writes_or_removes_files(self):
+        self.warm_engine()
+
+        def refuse(*args, **kwargs):
+            raise AssertionError("Dictation must stay in memory")
+
+        with mock.patch.object(daemon, "complete_model_folder", return_value=True), \
+                mock.patch.object(daemon, "pcm16_samples", return_value="synthetic samples"), \
+                mock.patch("builtins.open", side_effect=refuse), \
+                mock.patch.object(daemon.os, "remove", side_effect=refuse), \
+                mock.patch.object(daemon.os, "unlink", side_effect=refuse), \
+                mock.patch.object(daemon.os, "replace", side_effect=refuse):
+            result = daemon.transcribe_pcm(SYNTHETIC_PCM, ["Lumora"], context="Earlier sentence")
+        self.assertTrue(result["success"])
+
+    def test_invalid_audio_is_rejected_before_recognition(self):
+        self.warm_engine()
+        self.engine.transcribe.reset_mock()
+        with mock.patch.object(daemon, "complete_model_folder", return_value=True):
+            for pcm in (b"", b"\x01", None, "not audio"):
+                with self.subTest(pcm=pcm):
+                    self.assertIn("error", daemon.transcribe_pcm(pcm))
+        self.engine.transcribe.assert_not_called()
 
 
 class PromptAndEchoTests(unittest.TestCase):
@@ -421,6 +425,25 @@ class DaemonConnectionTests(unittest.TestCase):
         connection.recv.return_value = payload
         return connection
 
+    def make_stream(self, payload):
+        """A connection whose reads consume one byte stream, like a real socket."""
+        connection = mock.Mock()
+        remaining = bytearray(payload)
+
+        def recv(size):
+            chunk = bytes(remaining[:size])
+            del remaining[:size]
+            return chunk
+
+        connection.recv.side_effect = recv
+        return connection
+
+    def transcription(self, audio=SYNTHETIC_PCM, **fields):
+        request = {"action": "transcribe", "protocol_version": daemon.PROTOCOL_VERSION,
+                   "request_id": self.REQUEST_ID, "audio_bytes": len(audio)}
+        request.update(fields)
+        return self.make_stream(json.dumps(request).encode() + b"\n" + audio)
+
     def serve_then_ping(self, first_connection):
         healthy_connection = self.make_connection(b'{"action":"ping"}\n')
         worker = mock.Mock()
@@ -439,10 +462,7 @@ class DaemonConnectionTests(unittest.TestCase):
     def test_serves_next_client_after_response_disconnect(self):
         for error_type in (BrokenPipeError, ConnectionResetError):
             with self.subTest(error=error_type.__name__):
-                connection = self.make_connection(json.dumps({
-                    "action": "transcribe", "protocol_version": daemon.PROTOCOL_VERSION,
-                    "request_id": self.REQUEST_ID, "path": "/unused"
-                }).encode() + b"\n")
+                connection = self.transcription()
                 connection.sendall.side_effect = error_type("client disconnected")
                 self.serve_then_ping(connection)
 
@@ -481,28 +501,47 @@ class DaemonConnectionTests(unittest.TestCase):
         self.assertTrue(json.loads(connection.sendall.call_args.args[0])["success"])
 
     def test_transcription_forwards_style_and_vocabulary(self):
-        connection = self.make_connection(json.dumps({
-            "action": "transcribe", "protocol_version": daemon.PROTOCOL_VERSION,
-            "request_id": self.REQUEST_ID, "path": "/unused",
-            "vocabulary": ["Lumora"], "style": "raw",
-        }).encode() + b"\n")
+        connection = self.transcription(vocabulary=["Lumora"], style="raw")
         worker = mock.Mock()
         worker.submit.return_value.result.return_value = {"text": " Lumora "}
         daemon.handle_connection(connection, worker)
-        worker.submit.assert_called_once_with(self.REQUEST_ID, "/unused", ["Lumora"], "raw", context=None)
+        worker.submit.assert_called_once_with(self.REQUEST_ID, SYNTHETIC_PCM, ["Lumora"], "raw", context=None)
         self.assertEqual(json.loads(connection.sendall.call_args.args[0])["text"], " Lumora ")
 
     def test_transcription_forwards_context(self):
-        connection = self.make_connection(json.dumps({
-            "action": "transcribe", "protocol_version": daemon.PROTOCOL_VERSION,
-            "request_id": self.REQUEST_ID, "path": "/unused",
-            "vocabulary": ["Lumora"], "style": "natural", "context": "Preceding text",
-        }).encode() + b"\n")
+        connection = self.transcription(vocabulary=["Lumora"], style="natural", context="Preceding text")
         worker = mock.Mock()
         worker.submit.return_value.result.return_value = {"text": " Result "}
         daemon.handle_connection(connection, worker)
-        worker.submit.assert_called_once_with(self.REQUEST_ID, "/unused", ["Lumora"], "natural", context="Preceding text")
+        worker.submit.assert_called_once_with(self.REQUEST_ID, SYNTHETIC_PCM, ["Lumora"], "natural", context="Preceding text")
         self.assertEqual(json.loads(connection.sendall.call_args.args[0])["text"], " Result ")
+
+    def test_audio_body_is_read_completely_into_memory(self):
+        # Larger than one header read, so part arrives with the header and the rest later.
+        audio = bytes(range(256)) * 64
+        connection = self.transcription(audio)
+        worker = mock.Mock()
+        worker.submit.return_value.result.return_value = {"text": "ok"}
+        daemon.handle_connection(connection, worker)
+        self.assertEqual(worker.submit.call_args.args[1], audio)
+
+    def test_missing_or_malformed_audio_is_refused_before_transcription(self):
+        header = {"action": "transcribe", "protocol_version": daemon.PROTOCOL_VERSION,
+                  "request_id": self.REQUEST_ID}
+        cases = {
+            "file path instead of audio": (dict(header, path="/tmp/speech.wav"), b""),
+            "odd byte count": (dict(header, audio_bytes=3), b"\x01\x02\x03"),
+            "over one hour": (dict(header, audio_bytes=daemon.MAX_AUDIO_BYTES + 2), b""),
+            "more audio than declared": (dict(header, audio_bytes=2), b"\x01\x00\x02\x00"),
+            "truncated audio": (dict(header, audio_bytes=8), b"\x01\x00"),
+        }
+        for name, (request, audio) in cases.items():
+            with self.subTest(name):
+                connection = self.make_stream(json.dumps(request).encode() + b"\n" + audio)
+                worker = mock.Mock()
+                daemon.handle_connection(connection, worker)
+                worker.submit.assert_not_called()
+                self.assertIn("error", json.loads(connection.sendall.call_args.args[0]))
 
     def test_cancel_never_queues_behind_inference(self):
         connection = self.make_connection(json.dumps({
@@ -576,11 +615,10 @@ class IsolatedWorkerTests(unittest.TestCase):
         with mock.patch.object(daemon.threading.Thread, "start"):
             worker = daemon.IsolatedInferenceWorker()
         request_id = str(uuid.uuid4())
-        with mock.patch.object(daemon, "_remove_recording") as remove:
-            self.assertTrue(worker.cancel(request_id))
-            future = worker.submit(request_id, "/tmp/canceled.wav", [], "natural")
+        self.assertTrue(worker.cancel(request_id))
+        future = worker.submit(request_id, SYNTHETIC_PCM, [], "natural")
         self.assertEqual(future.result(timeout=0.1)["error"], "Dictation canceled")
-        remove.assert_called_once_with("/tmp/canceled.wav")
+        self.assertNotIn(request_id, worker.jobs)
         worker.stopping.set()
 
     def test_cancel_active_inference_reaps_child_then_serves_next_request(self):
@@ -647,22 +685,23 @@ class IsolatedWorkerTests(unittest.TestCase):
                 return process
 
         context = FakeContext()
-        with mock.patch.object(daemon, "_remove_recording") as remove:
-            worker = daemon.IsolatedInferenceWorker(context)
-            try:
-                self.wait_until(lambda: len(context.processes) == 1 and daemon.engine_status()["status"] == "ready")
-                first = str(uuid.uuid4())
-                future = worker.submit(first, "/tmp/active.wav", [], "natural")
-                self.wait_until(lambda: bool(context.processes[0].pipe.sent))
-                self.assertTrue(worker.cancel(first))
-                self.assertEqual(future.result(timeout=0.1)["error"], "Dictation canceled")
-                self.wait_until(lambda: len(context.processes) >= 2 and context.processes[0].terminated)
-                remove.assert_any_call("/tmp/active.wav")
-                self.wait_until(lambda: daemon.engine_status()["status"] == "ready")
-                next_future = worker.submit(str(uuid.uuid4()), "/tmp/next.wav", [], "natural")
-                self.assertEqual(next_future.result(timeout=2)["text"], "next")
-            finally:
-                worker.shutdown()
+        worker = daemon.IsolatedInferenceWorker(context)
+        try:
+            self.wait_until(lambda: len(context.processes) == 1 and daemon.engine_status()["status"] == "ready")
+            first = str(uuid.uuid4())
+            future = worker.submit(first, SYNTHETIC_PCM, [], "natural")
+            self.wait_until(lambda: bool(context.processes[0].pipe.sent))
+            sent = context.processes[0].pipe.sent[0]
+            self.assertEqual(sent["pcm"], SYNTHETIC_PCM)
+            self.assertNotIn("path", sent)
+            self.assertTrue(worker.cancel(first))
+            self.assertEqual(future.result(timeout=0.1)["error"], "Dictation canceled")
+            self.wait_until(lambda: len(context.processes) >= 2 and context.processes[0].terminated)
+            self.wait_until(lambda: daemon.engine_status()["status"] == "ready")
+            next_future = worker.submit(str(uuid.uuid4()), SYNTHETIC_PCM, [], "natural")
+            self.assertEqual(next_future.result(timeout=2)["text"], "next")
+        finally:
+            worker.shutdown()
 
 if __name__ == "__main__":
     unittest.main()

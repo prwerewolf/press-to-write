@@ -208,6 +208,8 @@ class NemotronRecognizer:
             self.drain()
             return self.text
         finally:
+            # The worker keeps no transcript once the dictation is finished.
+            self.text = ""
             self.close_stream()
 
     def close_stream(self):
@@ -241,6 +243,7 @@ def fast_process(pipe):
             else:
                 raise ValueError("Unknown streaming command")
             pipe.send(result)
+            request = result = None
     except (EOFError, BrokenPipeError):
         pass
     except Exception as error:

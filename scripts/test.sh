@@ -65,14 +65,18 @@ swiftc -module-cache-path "$MODULE_CACHE" -parse-as-library \
     -o "$TEST_DIR/pill-display"
 "$TEST_DIR/pill-display"
 
-swiftc -module-cache-path "$MODULE_CACHE" -parse-as-library -D PRESSTOWRITE_TESTING \
-    Sources/PressToWrite/Core/RescueAudioController.swift \
+swiftc -module-cache-path "$MODULE_CACHE" -parse-as-library \
     Sources/PressToWrite/Core/PreferenceMigration.swift \
     Sources/PressToWrite/Core/CorrectionLearner.swift \
     Sources/PressToWrite/App/AppState.swift Sources/PressToWrite/Engine/TextCleaner.swift \
     Sources/PressToWrite/Engine/SpeechEngine.swift tests/test_app_state.swift \
     -o "$TEST_DIR/app-state"
-PRESSTOWRITE_TEST_RESCUE_DIR="$TEST_DIR/rescue" "$TEST_DIR/app-state"
+"$TEST_DIR/app-state"
+
+swiftc -module-cache-path "$MODULE_CACHE" -parse-as-library \
+    Sources/PressToWrite/Core/LegacyRecordingCleanup.swift tests/test_legacy_recording_cleanup.swift \
+    -o "$TEST_DIR/legacy-recording-cleanup"
+"$TEST_DIR/legacy-recording-cleanup"
 
 swiftc -module-cache-path "$MODULE_CACHE" -parse-as-library \
     Sources/PressToWrite/Core/PreferenceMigration.swift tests/test_preference_migration.swift \

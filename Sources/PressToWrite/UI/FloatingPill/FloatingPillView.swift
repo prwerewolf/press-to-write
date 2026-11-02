@@ -115,18 +115,6 @@ public struct FloatingPillView: View {
                     .foregroundColor(.white.opacity(0.85))
             }
 
-            // 3. Quick Copy on hover
-            if isHovering && !appState.lastTranscribedText.isEmpty && !appState.isRecording && !appState.isProcessing {
-                Button {
-                    appState.copyLastDictation()
-                } label: {
-                    Image(systemName: "doc.on.doc.fill")
-                        .font(.system(size: 8.5))
-                        .foregroundColor(.cyan)
-                }
-                .buttonStyle(.plain)
-                .help("Copy last transcription")
-            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(.horizontal, 7)
@@ -184,16 +172,6 @@ public struct FloatingPillView: View {
                     .foregroundColor(.orange)
                     .help(appState.statusMessage != "Ready" ? appState.statusMessage : appState.engineStatus.message)
                     .accessibilityLabel(Text(appState.statusMessage != "Ready" ? appState.statusMessage : appState.engineStatus.message))
-            } else if isHovering && !appState.lastTranscribedText.isEmpty {
-                Button {
-                    appState.copyLastDictation()
-                } label: {
-                    Image(systemName: "doc.on.doc.fill")
-                        .font(.system(size: 8.5))
-                        .foregroundColor(.cyan)
-                }
-                .buttonStyle(.plain)
-                .help("Copy last transcription")
             }
             // In Idle: NOTHING else! ZERO dots! Clean icon only!
         }

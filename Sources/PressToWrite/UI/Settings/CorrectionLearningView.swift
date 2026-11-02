@@ -7,13 +7,9 @@ struct CorrectionLearningSettings: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Toggle("Suggest spelling corrections", isOn: $appState.correctionLearningEnabled)
-            Text("After you fix dictated text, choose Remember to save its spelling on this Mac. Learning stops when you leave the field and is paused in Incognito.")
+            Text("After you fix dictated text, choose Remember to save its spelling on this Mac. Learning stops when you leave the field. Only words you remember are saved, never what you said.")
                 .font(.caption)
                 .foregroundStyle(Color.primary.opacity(0.8))
-            if appState.historyRetention == .off {
-                Label("Paused while Incognito is enabled", systemImage: "pause.circle")
-                    .font(.caption)
-            }
 
             HStack {
                 Text("Learned Vocabulary").fontWeight(.medium)

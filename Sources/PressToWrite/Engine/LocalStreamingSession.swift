@@ -35,7 +35,7 @@ public final class LocalStreamingSession: @unchecked Sendable {
             return
         }
         if pcm.count % 2 != 0 || pcm.count > 32000 || pendingBytes + pcm.count > maxBufferedBytes {
-            failure = client.engineError("Fast mode could not keep up with audio. Recover this recording from Rescue Audio.")
+            failure = client.engineError("Fast mode could not keep up with audio. Please dictate again.")
             condition.broadcast()
             condition.unlock()
             inFlight.cancel()
@@ -91,7 +91,7 @@ public final class LocalStreamingSession: @unchecked Sendable {
     }
 
     private func validated(_ response: [String: Any]) throws {
-        guard response["protocol_version"] as? Int == 3 else {
+        guard response["protocol_version"] as? Int == client.protocolVersion else {
             throw client.engineError("Restart Press To Write to update the local speech connection.")
         }
         if let error = response["error"] as? String { throw client.engineError(error) }
@@ -104,7 +104,7 @@ public final class LocalStreamingSession: @unchecked Sendable {
             defer { inFlight.clear(fd); close(fd) }
             try inFlight.register(fd)
             try client.sendJSON([
-                "action": "stream", "protocol_version": 3,
+                "action": "stream", "protocol_version": client.protocolVersion,
                 "request_id": requestID, "vocabulary": vocabulary,
             ], to: fd)
             try validated(client.readJSON(from: fd))

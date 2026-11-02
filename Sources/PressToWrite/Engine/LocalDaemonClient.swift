@@ -38,7 +38,7 @@ public final class LocalDaemonClient: SpeechEngineProtocol, @unchecked Sendable 
     public static let shared = LocalDaemonClient()
 
     private let socketPath = "/tmp/presstowrite.sock"
-    private let protocolVersion = 3
+    let protocolVersion = 4
     private let lifecycleQueue = DispatchQueue(label: "com.presstowrite.local-engine", qos: .utility)
     // Only accessed on lifecycleQueue, which also serializes launch attempts.
     private var launchedProcess: Process?
@@ -261,11 +261,13 @@ public final class LocalDaemonClient: SpeechEngineProtocol, @unchecked Sendable 
             throw engineError("Another process is using Press To Write's local speech socket.")
         }
         var legacyPID: pid_t?
-        if response["protocol_version"] as? Int == protocolVersion,
+        // Version 3 has the same verified shutdown command as the current version.
+        if let oldVersion = response["protocol_version"] as? Int,
+           (3...protocolVersion).contains(oldVersion),
            let oldHash = response["script_sha256"] as? String,
            oldHash.count == 64 {
             let shutdownResponse = try request([
-                "action": "shutdown", "protocol_version": protocolVersion,
+                "action": "shutdown", "protocol_version": oldVersion,
                 "expected_sha256": oldHash,
             ], timeout: 2)
             guard shutdownResponse["success"] as? Bool == true else {
@@ -382,7 +384,9 @@ public final class LocalDaemonClient: SpeechEngineProtocol, @unchecked Sendable 
         return listing.split(separator: "\n").first(where: { $0.hasPrefix("n/") }).map { String($0.dropFirst()) }
     }
 
-    public func transcribe(audioFileURL: URL, vocabulary: [String], style: TranscriptionStyle, context: String? = nil) async throws -> String {
+    /// Sends the recording over the private Unix socket. Audio stays in memory in
+    /// both processes; neither side writes it to a file.
+    public func transcribe(pcm16: Data, vocabulary: [String], style: TranscriptionStyle, context: String? = nil) async throws -> String {
         try Task.checkCancellation()
         var currentStatus = await engineStatus()
         // A canceled decode restarts the isolated MLX child. A recording released
@@ -406,7 +410,7 @@ public final class LocalDaemonClient: SpeechEngineProtocol, @unchecked Sendable 
             "action": "transcribe",
             "protocol_version": self.protocolVersion,
             "request_id": requestID,
-            "path": audioFileURL.path,
+            "audio_bytes": pcm16.count,
             "vocabulary": vocabulary,
             "style": styleID,
         ]
@@ -418,7 +422,7 @@ public final class LocalDaemonClient: SpeechEngineProtocol, @unchecked Sendable 
                 DispatchQueue.global(qos: .userInitiated).async {
                     do {
                         if inFlight.isCancelled { throw CancellationError() }
-                        let response = try self.request(requestPayload, timeout: 120, inFlight: inFlight)
+                        let response = try self.request(requestPayload, timeout: 120, inFlight: inFlight, body: pcm16)
                         if inFlight.isCancelled { throw CancellationError() }
                         guard response["protocol_version"] as? Int == self.protocolVersion else {
                             throw self.engineError("Restart Press To Write to update the local speech engine.")
@@ -489,7 +493,7 @@ public final class LocalDaemonClient: SpeechEngineProtocol, @unchecked Sendable 
 
     private func request(
         _ request: [String: Any], timeout: Int,
-        inFlight: InFlightTranscription? = nil, connectedFD: Int32? = nil
+        inFlight: InFlightTranscription? = nil, connectedFD: Int32? = nil, body: Data? = nil
     ) throws -> [String: Any] {
         let fd = try connectedFD ?? connectedSocket(timeout: timeout)
         defer {
@@ -498,6 +502,15 @@ public final class LocalDaemonClient: SpeechEngineProtocol, @unchecked Sendable 
         }
         try inFlight?.register(fd)
         try sendJSON(request, to: fd)
+        if let body {
+            do {
+                try sendData(body, to: fd)
+            } catch {
+                // The daemon can refuse audio mid-upload; report its reason when it sent one.
+                if let reply = try? readJSON(from: fd) { return reply }
+                throw error
+            }
+        }
         return try readJSON(from: fd)
     }
 

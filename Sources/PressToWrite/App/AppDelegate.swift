@@ -4,12 +4,11 @@ import SwiftUI
 import Combine
 
 @MainActor
-public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
+public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     public var statusItem: NSStatusItem?
     public var pillPanel: FloatingPillPanel?
 
     private var settingsWindow: NSWindow?
-    private var historyWindow: NSWindow?
     private var permissionsWindow: NSWindow?
     private var watchdogTimer: Timer?
     private var correctionPanel: CorrectionSuggestionPanel?
@@ -19,6 +18,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
     public func applicationDidFinishLaunching(_ notification: Notification) {
         // Run as standard macOS application with Dock presence
         NSApp.setActivationPolicy(.regular)
+
+        // Older builds kept the latest recording on disk. Remove any leftovers.
+        DispatchQueue.global(qos: .utility).async { LegacyRecordingCleanup.run() }
 
         setupMainMenu()
         setupStatusItem()
@@ -115,10 +117,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         permissionsItem.target = self
         appMenu.addItem(permissionsItem)
 
-        let historyItem = NSMenuItem(title: "Dictation History...", action: #selector(openHistory), keyEquivalent: "y")
-        historyItem.target = self
-        appMenu.addItem(historyItem)
-
         appMenu.addItem(NSMenuItem.separator())
 
         let servicesMenuItem = NSMenuItem(title: "Services", action: nil, keyEquivalent: "")
@@ -207,14 +205,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         dictateItem.target = self
         menu.addItem(dictateItem)
 
-        let copyLastItem = NSMenuItem(title: "Copy Last Dictation", action: #selector(copyLastDictationAction), keyEquivalent: "c")
-        copyLastItem.target = self
-        menu.addItem(copyLastItem)
-
-        let recoverItem = NSMenuItem(title: "Transcribe Last Recording", action: #selector(transcribeLastRecordingAction), keyEquivalent: "r")
-        recoverItem.target = self
-        menu.addItem(recoverItem)
-
         // Transcription Style Submenu
         let styleMenuItem = NSMenuItem(title: "Style", action: nil, keyEquivalent: "")
         let styleSubmenu = NSMenu()
@@ -228,10 +218,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         menu.addItem(styleMenuItem)
 
         menu.addItem(NSMenuItem.separator())
-
-        let historyItem = NSMenuItem(title: "Dictation History...", action: #selector(openHistory), keyEquivalent: "h")
-        historyItem.target = self
-        menu.addItem(historyItem)
 
         let settingsItem = NSMenuItem(title: "Settings & Vocabulary...", action: #selector(openSettings), keyEquivalent: ",")
         settingsItem.target = self
@@ -269,7 +255,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         quitItem.target = self
         menu.addItem(quitItem)
 
-        menu.delegate = self
         item.menu = menu
         self.statusItem = item
 
@@ -283,40 +268,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         if !statusItem.isVisible { statusItem.isVisible = true }
     }
 
-    public func menuWillOpen(_ menu: NSMenu) {
-        if let copyItem = menu.items.first(where: { $0.action == #selector(copyLastDictationAction) }) {
-            let lastText = AppState.shared.lastTranscribedText.trimmingCharacters(in: .whitespacesAndNewlines)
-            if lastText.isEmpty {
-                copyItem.title = "Copy Last Dictation (None)"
-                copyItem.isEnabled = false
-            } else {
-                let preview = lastText.count > 25 ? String(lastText.prefix(22)) + "..." : lastText
-                copyItem.title = "Copy: \"\(preview)\""
-                copyItem.isEnabled = true
-            }
-        }
-        if let recoverItem = menu.items.first(where: { $0.action == #selector(transcribeLastRecordingAction) }) {
-            if RescueAudioController.shared.hasRescueAudio {
-                let duration = RescueAudioController.shared.pendingMetadata?.duration ?? 0.0
-                recoverItem.title = String(format: "Transcribe Last Recording (%.1fs)", duration)
-                recoverItem.isEnabled = !AppState.shared.isRecording && !AppState.shared.isProcessing
-            } else {
-                recoverItem.title = "Transcribe Last Recording (None)"
-                recoverItem.isEnabled = false
-            }
-        }
-    }
-
     @objc private func toggleDictation() {
         AppState.shared.toggleRecording()
-    }
-
-    @objc private func copyLastDictationAction() {
-        AppState.shared.copyLastDictation()
-    }
-
-    @objc private func transcribeLastRecordingAction() {
-        AppState.shared.transcribeRescueAudio()
     }
 
     @objc private func selectStyle(_ sender: NSMenuItem) {
@@ -349,24 +302,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate,
         if let window = notification.object as? NSWindow, window === settingsWindow {
             MicrophoneController.shared.endMonitoring()
         }
-    }
-
-    @objc public func openHistory() {
-        if historyWindow == nil {
-            let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 500, height: 460),
-                styleMask: [.titled, .closable, .resizable],
-                backing: .buffered,
-                defer: false
-            )
-            window.title = "Press To Write History"
-            window.center()
-            window.contentView = NSHostingView(rootView: HistoryView())
-            window.isReleasedWhenClosed = false
-            self.historyWindow = window
-        }
-        historyWindow?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
     }
 
     @objc public func openPermissions() {

@@ -38,7 +38,6 @@ struct PreferenceMigrationTests {
         ]
         let expected: [String: Any] = [
             "presstowrite_speech_mode": "speed",
-            "presstowrite_retention": "Keep Last 10 Items",
             "presstowrite_auto_copy": true,
             "presstowrite_auto_insert": false,
             "presstowrite_pill_orientation": "vertical",
@@ -61,7 +60,7 @@ struct PreferenceMigrationTests {
         let migrated = UserDefaults(legacy)
         PreferenceMigration.migrate(migrated)
         precondition(NSDictionary(dictionary: migrated.values).isEqual(to: expected),
-                     "Every supported preference must be preserved and its legacy key removed")
+                     "Every supported preference must be preserved, retired history retention dropped, and legacy keys removed")
         PreferenceMigration.migrate(migrated)
         precondition(NSDictionary(dictionary: migrated.values).isEqual(to: expected),
                      "Repeating migration must not alter saved settings")
@@ -94,10 +93,22 @@ struct PreferenceMigrationTests {
             "metatron_openai_key": "test-only",
             "presstowrite_engine": "retired-cloud",
             "presstowrite_groq_key": "test-only",
-            "presstowrite_openai_key": "test-only"
+            "presstowrite_openai_key": "test-only",
+            "metatron_retention": "Keep Last 50 Items",
+            "presstowrite_retention": "Keep Last 10 Items"
         ])
         PreferenceMigration.migrate(retired)
-        precondition(retired.values.isEmpty, "Retired cloud settings and credentials must be removed, never copied")
+        precondition(retired.values.isEmpty, "Retired cloud and history settings and credentials must be removed, never copied")
+
+        // Incognito paused correction learning; retiring it must not turn learning back on.
+        for retentionKey in ["metatron_retention", "presstowrite_retention"] {
+            let incognito = UserDefaults([
+                retentionKey: "Incognito (Never save history)", "metatron_correction_learning": true
+            ])
+            PreferenceMigration.migrate(incognito)
+            precondition(NSDictionary(dictionary: incognito.values).isEqual(to: ["presstowrite_correction_learning": false]),
+                         "Incognito users must keep correction learning paused (\(retentionKey))")
+        }
 
         let fresh = UserDefaults()
         PreferenceMigration.migrate(fresh)

@@ -6,6 +6,35 @@ Press To Write is a local-first push-to-talk speech dictation app for Apple Sili
 
 ### Recently Completed & Verified
 
+**Nothing you say is stored (November 1-2, 2026; verified on one Mac):**
+
+- Owner decision: the app must never keep anything dictated. Audio is now captured
+  into memory and sent to the daemon over its private socket after a JSON header
+  with `audio_bytes` (protocol 4). Neither process writes a WAV or any other file.
+  Fast mode streams and keeps no copy. Audio and text are released when the
+  dictation finishes; the daemon also drops its last request and transcript.
+- Removed the saved recording (`RescueAudioController`, `last_recording.wav`,
+  `rescue_metadata.json`), Transcribe Last Recording, Copy Last Dictation, the pill's
+  copy button, the History window, and the retention setting (Incognito, Session
+  Only, Keep Last 10/50). The retention keys are retired; a user who had chosen
+  Incognito keeps correction learning off. At launch, `LegacyRecordingCleanup`
+  deletes old saved recordings and leftover temporary WAVs.
+- The end of the latest insertion stays in memory for 45 seconds as recognition
+  context, then is cleared. With Auto-Insert off, text is copied to the clipboard;
+  every manual-paste copy is marked so clipboard history apps skip it unless
+  "Keep Speech on System Clipboard" is on. The clipboard fallback itself is unchanged.
+- Verified: all thirteen Swift suites and 91 Python tests; a release build; the new
+  regressions were mutation-checked (13 deliberate breaks, all caught). A live run
+  of the signed build on one Mac recognized synthetic speech played into
+  the microphone in both Accuracy and Fast modes. Before/after listings of the app's
+  folders, a sweep of all 431 files changed during the test, the daemon log and the
+  unified log showed no new audio file and no dictated text; the only removals were
+  the old saved recording.
+- Not verified: a successful paste during the live run (the test window lost focus,
+  so the app correctly used the clipboard fallback), and any run on the second Mac
+  before release. `make test` still copies the daemon script into the real
+  Application Support folder through `test_local_daemon_client` (pre-existing).
+
 **Two-Mac review fixes (October 28, 2026; verified locally on one Mac):**
 
 - Rescue transcription now works on a temporary copy. The speech engine deletes
@@ -231,10 +260,8 @@ Press To Write is a local-first push-to-talk speech dictation app for Apple Sili
    - Modifier releases and unexpected `flagsChanged` events unconditionally reset `isFnDown`, `isRightOptionDown`, and `isRightCommandDown`.
    - `startRecording()` and `onRecordingError` explicitly call `resetModifierStates()` to guarantee modifier flags can never stay latched after an error.
 
-11. **Persistent Audio Rescue System & Menu Bar Recovery (`RescueAudioController.swift`)**:
-   - Raw recorded audio is persisted to `~/Library/Application Support/Press To Write/last_recording.wav` with a JSON metadata manifest.
-   - Speech audio is never discarded on device errors or transcription timeouts.
-   - Added **"Transcribe Last Recording"** menu bar status item with duration readout (`AppDelegate.swift`), enabling instant one-click recovery to the clipboard at any time.
+11. **Audio rescue (retired November 2026)**:
+   - The saved last recording and its Transcribe Last Recording menu item were removed at the owner's request. Nothing dictated is stored; see the November 1-2, 2026 entry.
 
 12. **Zero-Orphan Process Watchdog (`whisper_daemon.py` & `LocalDaemonClient.swift`)**:
    - `PRESSTOWRITE_PARENT_PID` environment propagation to spawned daemons.
@@ -307,7 +334,7 @@ Press To Write is a local-first push-to-talk speech dictation app for Apple Sili
 ## Architectural Context & Gotchas
 
 - **Strict Offline Enforcement**: The Python daemon sets `sys.addaudithook(deny_network_access)` to block socket connections and DNS lookups at the interpreter level. Any feature or dependency that introduces network calls will be blocked and will fail tests.
-- **Audio Rescue Invariant**: Speech audio is saved to `RescueAudioController` whenever recording finishes or encounters an error after >= 1.0s of speech. The temporary file in `/tmp` is removed to prevent disk leaks while preserving user voice data in Application Support.
+- **No Speech Storage Invariant**: Audio and dictated text never touch the disk, in any mode: no saved recording, transcript, history, temporary file, or log line. Audio lives in memory for one dictation and travels to the daemon over its private socket. `tests/test_no_speech_storage.py` guards the source; do not reintroduce rescue or history persistence.
 - **Standalone Undo vs. Mid-Utterance**: `TextCleaner.isStandaloneUndoCommand` preserves bare undo commands so `AppState` can inspect them before text insertion and trigger `Cmd+Z`. Mid-utterance commands are handled separately in `cleanScratchThatPhrases`.
 - **Accessibility Permissions**: Virtual keystroke insertion (`Cmd+V`, `Cmd+Z`) and focused element inspection require macOS Accessibility permissions. If ungranted, clipboard fallback is used.
-- **GUI Process `PATH`**: Apps launched by Finder may not inherit Homebrew paths. Pass decoded NumPy audio to MLX Whisper, rather than a WAV filename that would make the dependency call `ffmpeg`. Press To Write's PCM16 WAV format is validated before inference.
+- **GUI Process `PATH`**: Apps launched by Finder may not inherit Homebrew paths. Pass decoded NumPy audio to MLX Whisper, rather than a filename that would make the dependency call `ffmpeg`. The in-memory PCM16 audio is validated before inference.

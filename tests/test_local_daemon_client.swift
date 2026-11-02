@@ -7,7 +7,7 @@ struct LocalDaemonClientTests {
         let client = LocalDaemonClient.shared
         let hash = String(repeating: "a", count: 64)
         let current: [String: Any] = [
-            "protocol_version": 3, "offline": true, "script_sha256": hash,
+            "protocol_version": client.protocolVersion, "offline": true, "script_sha256": hash,
         ]
         precondition(client.isCurrentDaemon(current, scriptHash: hash))
         precondition(!client.isCurrentDaemon(current, scriptHash: String(repeating: "b", count: 64)))
@@ -15,7 +15,10 @@ struct LocalDaemonClientTests {
             "protocol_version": 2, "offline": true, "script_sha256": hash,
         ], scriptHash: hash))
         precondition(!client.isCurrentDaemon([
-            "protocol_version": 3, "offline": false, "script_sha256": hash,
+            "protocol_version": 3, "offline": true, "script_sha256": hash,
+        ], scriptHash: hash), "A daemon that reads recordings from files must be replaced")
+        precondition(!client.isCurrentDaemon([
+            "protocol_version": client.protocolVersion, "offline": false, "script_sha256": hash,
         ], scriptHash: hash))
 
         let repo = FileManager.default.currentDirectoryPath

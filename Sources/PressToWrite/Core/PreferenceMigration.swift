@@ -4,7 +4,6 @@ import Foundation
 public enum PreferenceMigration {
     private static let keyRenames: [(legacy: String, current: String)] = [
         ("metatron_speech_mode", "presstowrite_speech_mode"),
-        ("metatron_retention", "presstowrite_retention"),
         ("metatron_auto_copy", "presstowrite_auto_copy"),
         ("metatron_auto_insert", "presstowrite_auto_insert"),
         ("metatron_pill_orientation", "presstowrite_pill_orientation"),
@@ -33,10 +32,19 @@ public enum PreferenceMigration {
             defaults.removeObject(forKey: legacy)
         }
 
+        // Incognito also paused correction learning. With no history setting left,
+        // keep learning off for anyone who had chosen Incognito.
+        let retention = defaults.object(forKey: "presstowrite_retention") ?? defaults.object(forKey: "metatron_retention")
+        if retention as? String == "Incognito (Never save history)" {
+            defaults.set(false, forKey: "presstowrite_correction_learning")
+        }
+
         // Cloud transcription and its credentials remain retired, never copied.
+        // History retention is retired too: no dictation is ever kept.
         for key in [
             "metatron_engine", "metatron_groq_key", "metatron_openai_key",
-            "presstowrite_engine", "presstowrite_groq_key", "presstowrite_openai_key"
+            "presstowrite_engine", "presstowrite_groq_key", "presstowrite_openai_key",
+            "metatron_retention", "presstowrite_retention"
         ] {
             defaults.removeObject(forKey: key)
         }

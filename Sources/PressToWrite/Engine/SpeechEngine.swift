@@ -31,12 +31,13 @@ public struct LocalEngineStatus: Equatable, Sendable {
     }
 }
 
+/// Audio is 16 kHz mono PCM16 held in memory. It is never written to disk.
 public protocol SpeechEngineProtocol {
-    func transcribe(audioFileURL: URL, vocabulary: [String], style: TranscriptionStyle, context: String?) async throws -> String
+    func transcribe(pcm16: Data, vocabulary: [String], style: TranscriptionStyle, context: String?) async throws -> String
 }
 
 public extension SpeechEngineProtocol {
-    func transcribe(audioFileURL: URL, vocabulary: [String], style: TranscriptionStyle) async throws -> String {
-        try await transcribe(audioFileURL: audioFileURL, vocabulary: vocabulary, style: style, context: nil)
+    func transcribe(pcm16: Data, vocabulary: [String], style: TranscriptionStyle) async throws -> String {
+        try await transcribe(pcm16: pcm16, vocabulary: vocabulary, style: style, context: nil)
     }
 }

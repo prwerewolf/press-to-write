@@ -12,6 +12,7 @@ public final class UserDefaults {
     public func string(forKey key: String) -> String? { values[key] as? String }
     public func object(forKey key: String) -> Any? { values[key] }
     public func bool(forKey key: String) -> Bool { values[key] as? Bool ?? false }
+    public var allValues: [String: Any] { values }
 }
 
 public final class NSPasteboard {
@@ -39,26 +40,24 @@ public final class HotkeyManager {
     public static func requestAccessibilityPermission() {}
 }
 
+// Like the real recorder, this holds audio in memory and writes no files.
 public final class AudioRecorder {
     public static let shared = AudioRecorder()
     public var onAudioLevel: ((Float) -> Void)?
-    public var onRecordingError: ((Error, URL?) -> Void)?
-    public private(set) var recordings: [URL] = []
-    public var removeOnStop = false
+    public var onRecordingError: ((Error) -> Void)?
+    public var capturedPCM = Data([1, 0, 2, 0])
+    public private(set) var retainFlags: [Bool] = []
+    public private(set) var isRecording = false
     public var pcmCallback: ((Data) -> Void)?
-    public func startRecording(onPCM16: ((Data) -> Void)? = nil) throws -> URL {
+    public func startRecording(retainPCM: Bool = true, onPCM16: ((Data) -> Void)? = nil) throws {
         pcmCallback = onPCM16
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("presstowrite-state-test-\(UUID().uuidString)")
-        try Data([0]).write(to: url)
-        recordings.append(url)
-        return url
+        retainFlags.append(retainPCM)
+        isRecording = true
     }
-    public func stopRecording() -> URL? {
-        if removeOnStop, let url = recordings.last {
-            try? FileManager.default.removeItem(at: url)
-        }
-        return recordings.last
+    public func stopRecording() -> Data? {
+        guard isRecording else { return nil }
+        isRecording = false
+        return retainFlags.last == true ? capturedPCM : Data()
     }
 }
 
@@ -79,7 +78,7 @@ public final class LocalDaemonClient: SpeechEngineProtocol {
     public var suspend = false
     public var pending: [CheckedContinuation<String, Error>] = []
     public private(set) var requests: [(vocabulary: [String], style: TranscriptionStyle, context: String?)] = []
-    public private(set) var audioURLs: [URL] = []
+    public private(set) var audio: [Data] = []
     public func engineStatus(mode: SpeechMode = .accuracy) async -> LocalEngineStatus { status }
     public private(set) var streams: [LocalStreamingSession] = []
     public func startStreaming(vocabulary: [String]) -> LocalStreamingSession {
@@ -87,12 +86,9 @@ public final class LocalDaemonClient: SpeechEngineProtocol {
         streams.append(session)
         return session
     }
-    public func transcribe(audioFileURL: URL, vocabulary: [String], style: TranscriptionStyle, context: String? = nil) async throws -> String {
+    public func transcribe(pcm16: Data, vocabulary: [String], style: TranscriptionStyle, context: String? = nil) async throws -> String {
         requests.append((vocabulary, style, context))
-        audioURLs.append(audioFileURL)
-        // The real daemon removes every file it is asked to transcribe, including
-        // after an engine error or cancellation. The app must hand it a copy.
-        defer { try? FileManager.default.removeItem(at: audioFileURL) }
+        audio.append(pcm16)
         if suspend {
             return try await withCheckedThrowingContinuation { pending.append($0) }
         }
@@ -177,6 +173,12 @@ public final class TextInserter {
     public var pendingCompletion: (() -> Void)?
     public private(set) var undoCount = 0
     public var undoSucceeds = true
+    public private(set) var manualCopies: [(text: String, keepInHistory: Bool)] = []
+    public func copyForManualPaste(_ text: String, keepInHistory: Bool) {
+        manualCopies.append((text, keepInHistory))
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
     public func insertText(_ text: String, keepOnClipboard: Bool, target: InsertionTarget?, shouldInsert: (() -> Bool)? = nil, completion: ((Bool) -> Void)? = nil) {
         pendingCompletion = {
             let inserted = target?.isCurrent == true && shouldInsert?() != false
@@ -213,10 +215,6 @@ struct AppStateTests {
         let recorder = AudioRecorder.shared
         let engine = LocalDaemonClient.shared
         precondition(state.speechMode == .accuracy, "Whisper must remain the default")
-        defer {
-            for url in recorder.recordings { try? FileManager.default.removeItem(at: url) }
-        }
-        precondition(state.historyRetention == .clearOnQuit)
         precondition(!state.autoCopyToClipboard && state.autoInsertText)
         precondition(state.pillOrientation == .horizontal)
         precondition(state.transcriptionStyle == .professional)
@@ -247,17 +245,23 @@ struct AppStateTests {
         observer.cancel()
 
         state.startRecording()
+        precondition(recorder.retainFlags.last == true, "Whisper needs the recording in memory")
         state.stopRecordingAndTranscribe()
         try await waitUntil { !state.isProcessing }
-        precondition(state.showSuccess && state.lastTranscribedText == "Test dictation")
-        precondition(!FileManager.default.fileExists(atPath: recorder.recordings[0].path))
+        precondition(state.showSuccess && NSPasteboard.general.writes.last == "Test dictation",
+                     "Without insertion, the clipboard receives the dictation")
+        precondition(state.statusMessage == "Copied to Clipboard!")
+        precondition(TextInserter.shared.manualCopies.last?.keepInHistory == false,
+                     "Clipboard history managers are told to skip speech unless the user keeps it")
+        precondition(engine.audio.last == recorder.capturedPCM, "The engine receives the recording from memory")
+        precondition(!recorder.isRecording)
 
         // Feedback must not delay the next recording or reset its listening state.
         state.startRecording()
         precondition(state.isRecording && !state.showSuccess)
         try await Task.sleep(nanoseconds: 2_300_000_000)
         precondition(state.isRecording && state.statusMessage == "Listening...")
-        precondition(FileManager.default.fileExists(atPath: recorder.recordings[1].path))
+        precondition(recorder.isRecording)
 
         LocalDaemonClient.shared.result = .failure(NSError(
             domain: "Test", code: 1, userInfo: [NSLocalizedDescriptionKey: "Test failure"]
@@ -265,7 +269,7 @@ struct AppStateTests {
         state.stopRecordingAndTranscribe()
         try await waitUntil { !state.isProcessing }
         precondition(state.statusMessage == "Test failure" && !state.showSuccess)
-        precondition(!FileManager.default.fileExists(atPath: recorder.recordings[1].path))
+        precondition(!recorder.isRecording)
 
         LocalDaemonClient.shared.result = .success("")
         state.startRecording()
@@ -275,22 +279,27 @@ struct AppStateTests {
         try await Task.sleep(nanoseconds: 1_300_000_000)
         precondition(state.statusMessage == "Ready")
 
-        recorder.removeOnStop = true
+        let requestsBeforeEmptyAudio = engine.requests.count
+        recorder.capturedPCM = Data()
         state.startRecording()
         state.stopRecordingAndTranscribe()
         try await waitUntil { !state.isProcessing }
         precondition(state.statusMessage == "No Audio")
-        recorder.removeOnStop = false
+        precondition(engine.requests.count == requestsBeforeEmptyAudio, "Empty audio never reaches the engine")
+        recorder.capturedPCM = Data([1, 0, 2, 0])
 
         // Preserve the user-requested clipboard fallback when permission is absent.
         LocalDaemonClient.shared.result = .success("Test dictation")
         HotkeyManager.granted = false
         state.autoInsertText = true
+        let writesBeforeFallback = NSPasteboard.general.writes.count
         state.startRecording()
         state.stopRecordingAndTranscribe()
         try await waitUntil { !state.isProcessing }
         precondition(!state.autoCopyToClipboard)
-        precondition(NSPasteboard.general.writes == ["Test dictation"])
+        precondition(NSPasteboard.general.writes.count == writesBeforeFallback + 1)
+        precondition(NSPasteboard.general.writes.last == "Test dictation")
+        precondition(TextInserter.shared.manualCopies.last?.keepInHistory == false)
         precondition(state.statusMessage == "Copied! (Grant Accessibility to auto-insert)")
 
         // Actual insertion still finishes before another recording can begin.
@@ -305,9 +314,9 @@ struct AppStateTests {
         TextInserter.shared.pendingCompletion = nil
         try await waitUntil { !state.isProcessing }
         precondition(state.showSuccess && state.statusMessage == "Inserted!")
-        precondition(!FileManager.default.fileExists(atPath: recorder.recordings.last!.path))
+        precondition(!recorder.isRecording)
 
-        // A changed destination retains the result for explicit copy, without a false success.
+        // A changed destination puts the result on the clipboard, without a false success.
         state.startRecording()
         state.stopRecordingAndTranscribe()
         try await waitUntil { TextInserter.shared.pendingCompletion != nil }
@@ -316,21 +325,20 @@ struct AppStateTests {
         TextInserter.shared.pendingCompletion = nil
         try await waitUntil { !state.isProcessing }
         precondition(state.hasPendingInsertion && !state.showSuccess)
-        precondition(state.lastTranscribedText == "Test dictation")
+        precondition(NSPasteboard.general.writes.last == "Test dictation")
         precondition(state.statusMessage.contains("manual paste"))
         InsertionTarget.current = true
 
-        // Escape stops capture, deletes its file, and never calls the recognizer.
+        // Escape stops capture, discards its audio, and never calls the recognizer.
         let callsBeforeCancel = engine.requests.count
         state.startRecording()
-        let canceledFile = recorder.recordings.last!
         HotkeyManager.shared.onCancel?()
         try await waitUntil { !state.isRecording }
         precondition(state.statusMessage == "Canceled")
         precondition(engine.requests.count == callsBeforeCancel)
-        precondition(!FileManager.default.fileExists(atPath: canceledFile.path))
+        precondition(!recorder.isRecording)
 
-        // Cancel before the queued task starts: its missing-file path must not affect new capture.
+        // Cancel before the queued task starts: it must not affect new capture.
         state.startRecording()
         state.stopRecordingAndTranscribe()
         state.cancelDictation()
@@ -349,20 +357,19 @@ struct AppStateTests {
         state.startRecording()
         state.stopRecordingAndTranscribe()
         try await waitUntil { engine.pending.count == 2 }
-        let historyCount = state.history.count
+        let writesBeforeCanceledResult = NSPasteboard.general.writes.count
         engine.pending.removeFirst().resume(returning: "Canceled result")
         try await Task.sleep(nanoseconds: 20_000_000)
-        precondition(state.isProcessing && state.history.count == historyCount)
-        precondition(state.lastTranscribedText != "Canceled result")
+        precondition(state.isProcessing && NSPasteboard.general.writes.count == writesBeforeCanceledResult)
         engine.pending.removeFirst().resume(returning: "Current result")
         try await waitUntil { !state.isProcessing }
-        precondition(state.lastTranscribedText == "Current result")
+        precondition(NSPasteboard.general.writes.last == "Current result")
+        precondition(!NSPasteboard.general.writes.contains("Canceled result"))
         engine.suspend = false
 
         // Cancellation during the paste delay invalidates the insertion guard too.
         state.autoInsertText = true
-        let lastTextBeforeCanceledPaste = state.lastTranscribedText
-        let historyBeforeCanceledPaste = state.history.count
+        let writesBeforeCanceledPaste = NSPasteboard.general.writes.count
         state.startRecording()
         state.stopRecordingAndTranscribe()
         try await waitUntil { TextInserter.shared.pendingCompletion != nil }
@@ -372,8 +379,8 @@ struct AppStateTests {
         TextInserter.shared.pendingCompletion = nil
         try await Task.sleep(nanoseconds: 20_000_000)
         precondition(state.isRecording && !state.isProcessing && !state.showSuccess && state.statusMessage == "Listening...")
-        precondition(state.lastTranscribedText == lastTextBeforeCanceledPaste && state.history.count == historyBeforeCanceledPaste)
-        precondition(FileManager.default.fileExists(atPath: recorder.recordings.last!.path))
+        precondition(NSPasteboard.general.writes.count == writesBeforeCanceledPaste)
+        precondition(recorder.isRecording)
         state.cancelDictation()
 
         // Vocabulary and style are captured per utterance, including unchanged Raw output.
@@ -387,37 +394,17 @@ struct AppStateTests {
         try await waitUntil { !state.isProcessing }
         precondition(engine.requests.last!.vocabulary == ["Sample User", "Asteria"])
         precondition(engine.requests.last!.style == .raw)
-        precondition(state.lastTranscribedText == "  um, asteria period  ")
-
-        // Purge must also remove the copyable last result and pending insertion.
-        precondition(!state.history.isEmpty)
-        state.clearHistory()
-        precondition(state.history.isEmpty && state.lastTranscribedText.isEmpty)
-        precondition(!state.hasPendingInsertion && !state.showSuccess)
-        let clipboardWritesBeforeCopy = NSPasteboard.general.writes.count
-        state.copyLastDictation()
-        precondition(NSPasteboard.general.writes.count == clipboardWritesBeforeCopy,
-                     "Copy Last Dictation must not recover purged speech")
-
-        state.historyRetention = .clearOnQuit
-        engine.result = .success("Before incognito")
-        state.startRecording()
-        state.stopRecordingAndTranscribe()
-        try await waitUntil { !state.isProcessing }
-        precondition(!state.history.isEmpty && state.lastTranscribedText == "Before incognito")
-        state.historyRetention = .off
-        precondition(state.history.isEmpty && state.lastTranscribedText.isEmpty,
-                     "Entering Incognito must clear prior session dictations")
-        state.historyRetention = .clearOnQuit
+        precondition(NSPasteboard.general.writes.last == "  um, asteria period  ")
 
         // A microphone disconnect discards capture and provides actionable feedback.
+        let requestsBeforeDisconnect = engine.requests.count
         state.startRecording()
-        let failedFile = recorder.recordings.last!
+        _ = recorder.stopRecording() // The real recorder stops and discards before reporting.
         AudioRecorder.shared.onRecordingError?(NSError(domain: "Test", code: 2,
-            userInfo: [NSLocalizedDescriptionKey: "Microphone disconnected"]), failedFile)
+            userInfo: [NSLocalizedDescriptionKey: "Microphone disconnected"]))
         precondition(!state.isRecording && !state.isProcessing)
         precondition(state.statusMessage == "Microphone disconnected")
-        precondition(!FileManager.default.fileExists(atPath: failedFile.path))
+        precondition(engine.requests.count == requestsBeforeDisconnect, "Interrupted audio is discarded, not transcribed")
 
         // Accidental Click Guard: Stop immediately (< 0.25s) should quietly discard capture without transcribing
         state.minRecordingDuration = 0.25
@@ -441,13 +428,14 @@ struct AppStateTests {
         let whisperRequests = engine.requests.count
         state.startRecording()
         let fastSession = engine.streams.last!
+        precondition(recorder.retainFlags.last == false, "Fast mode streams audio and keeps no copy")
         precondition(fastSession.vocabulary.contains("Lumora"))
         recorder.pcmCallback?(Data([1, 0, 2, 0]))
         state.stopRecordingAndTranscribe()
         try await waitUntil { !state.isProcessing }
         precondition(fastSession.finished && fastSession.frames.count == 1)
         precondition(engine.requests.count == whisperRequests, "Fast release must not invoke batch Whisper")
-        precondition(state.lastTranscribedText.contains("Lumora"))
+        precondition(NSPasteboard.general.writes.last?.contains("Lumora") == true)
         state.startRecording()
         let cancelledStream = engine.streams.last!
         state.cancelDictation(showFeedback: false)
@@ -505,58 +493,6 @@ struct AppStateTests {
         precondition(TextInserter.shared.undoCount == priorUndos + 1)
         precondition(state.showSuccess)
 
-        // Rescue audio persistence and recovery test
-        let testRescueAudio = FileManager.default.temporaryDirectory
-            .appendingPathComponent("rescue-test-\(UUID().uuidString).wav")
-        try Data(repeating: 1, count: 2000).write(to: testRescueAudio)
-        RescueAudioController.shared.saveRescueAudio(from: testRescueAudio, duration: 3.5)
-        precondition(RescueAudioController.shared.hasRescueAudio, "Rescue audio must exist")
-        precondition(RescueAudioController.shared.pendingMetadata?.duration == 3.5, "Rescue duration matches")
-        precondition(RescueAudioController.shared.pendingMetadata?.status == "pending", "Status is pending")
-
-        engine.result = .success("Rescued speech content")
-        state.transcribeRescueAudio()
-        try await waitUntil { !state.isProcessing }
-        precondition(RescueAudioController.shared.pendingMetadata?.status == "transcribed", "Status marked transcribed")
-        precondition(state.lastTranscribedText == "Rescued speech content")
-        precondition(NSPasteboard.general.writes.contains("Rescued speech content"))
-        let rescueURL = RescueAudioController.shared.rescueAudioURL
-        let rescueCopy = engine.audioURLs.last!
-        precondition(rescueCopy != rescueURL, "The engine must receive a disposable copy, never the saved recording")
-        precondition(!FileManager.default.fileExists(atPath: rescueCopy.path), "The disposable copy must not be left behind")
-        precondition(RescueAudioController.shared.hasRescueAudio,
-                     "A completed rescue keeps the saved recording, as a normal dictation does")
-
-        // The saved recording must survive a failed attempt so it can be retried.
-        engine.result = .failure(NSError(domain: "Test", code: 2, userInfo: [NSLocalizedDescriptionKey: "Engine failure"]))
-        state.transcribeRescueAudio()
-        try await waitUntil { !state.isProcessing }
-        precondition(RescueAudioController.shared.pendingMetadata?.status == "failed", "Failure is recorded")
-        precondition(RescueAudioController.shared.hasRescueAudio, "A failed rescue must not delete the saved recording")
-        precondition(!FileManager.default.fileExists(atPath: engine.audioURLs.last!.path))
-
-        // Escape during a rescue must not delete it, and a late result is ignored.
-        engine.suspend = true
-        let writesBeforeCancel = NSPasteboard.general.writes.count
-        state.transcribeRescueAudio()
-        try await waitUntil { engine.pending.count == 1 }
-        state.cancelDictation()
-        precondition(RescueAudioController.shared.hasRescueAudio, "Canceling a rescue must not delete the saved recording")
-        engine.pending.removeFirst().resume(returning: "Late rescued text")
-        let canceledCopy = engine.audioURLs.last!
-        try await waitUntil { !FileManager.default.fileExists(atPath: canceledCopy.path) }
-        precondition(RescueAudioController.shared.hasRescueAudio, "A late engine result must not delete the saved recording")
-        precondition(NSPasteboard.general.writes.count == writesBeforeCancel, "A canceled rescue must not reach the clipboard")
-        engine.suspend = false
-
-        // The same recording remains usable for a retry.
-        engine.result = .success("Retried rescue")
-        state.transcribeRescueAudio()
-        try await waitUntil { !state.isProcessing }
-        precondition(state.lastTranscribedText == "Retried rescue", "A rescue can be retried after a failure or cancel")
-        RescueAudioController.shared.clearRescueAudio()
-        try? FileManager.default.removeItem(at: testRescueAudio)
-
         // Context-aware prompt biasing & continuation test
         InsertionTarget.mockPrecedingText = "We are continuing this sentence and "
         engine.result = .success("reaching the conclusion period")
@@ -566,9 +502,40 @@ struct AppStateTests {
         try await waitUntil { !state.isProcessing }
         precondition(engine.requests.last!.context == "We are continuing this sentence and ",
                      "Engine must receive preceding text context")
-        precondition(state.lastTranscribedText == "reaching the conclusion.",
+        precondition(NSPasteboard.general.writes.last == "reaching the conclusion.",
                      "Continuation must preserve lowercase first letter")
         InsertionTarget.mockPrecedingText = nil
+
+        // A quick follow-up gets the previous insertion as context, and that
+        // text is forgotten when its window closes instead of kept for the session.
+        state.autoInsertText = true
+        state.continuationContextLifetime = 0.3
+        engine.result = .success("First sentence here.")
+        state.startRecording()
+        state.stopRecordingAndTranscribe()
+        try await waitUntil { TextInserter.shared.pendingCompletion != nil }
+        TextInserter.shared.pendingCompletion?()
+        TextInserter.shared.pendingCompletion = nil
+        try await waitUntil { !state.isProcessing }
+        engine.result = .success("Second sentence.")
+        state.startRecording()
+        state.stopRecordingAndTranscribe()
+        try await waitUntil { TextInserter.shared.pendingCompletion != nil }
+        precondition(engine.requests.last!.context == "First sentence here.",
+                     "A quick follow-up uses the previous insertion as context")
+        TextInserter.shared.pendingCompletion?()
+        TextInserter.shared.pendingCompletion = nil
+        try await waitUntil { !state.isProcessing }
+        try await Task.sleep(nanoseconds: 600_000_000)
+        state.startRecording()
+        state.stopRecordingAndTranscribe()
+        try await waitUntil { TextInserter.shared.pendingCompletion != nil }
+        precondition(engine.requests.last!.context == nil, "Earlier dictated text must be forgotten after its window")
+        TextInserter.shared.pendingCompletion?()
+        TextInserter.shared.pendingCompletion = nil
+        try await waitUntil { !state.isProcessing }
+        state.continuationContextLifetime = 45
+        state.autoInsertText = false
 
         // Correction learning needs a verified paste, then an explicit Remember.
         state.correctionLearningEnabled = true
@@ -627,9 +594,9 @@ struct AppStateTests {
         precondition(InsertionTarget.snapshotReads == readsBeforeFocusChange,
                      "A native focus-change notification must stop observation between polls")
 
-        // Incognito cancels observation and performs no further field reads.
-        state.historyRetention = .off
-        let readsBeforeIncognito = InsertionTarget.snapshotReads
+        // Turning learning off cancels observation and performs no further field reads.
+        state.correctionLearningEnabled = false
+        let readsBeforeDisabling = InsertionTarget.snapshotReads
         state.startRecording()
         state.stopRecordingAndTranscribe()
         try await waitUntil { TextInserter.shared.pendingCompletion != nil }
@@ -637,17 +604,14 @@ struct AppStateTests {
         TextInserter.shared.pendingCompletion = nil
         try await waitUntil { !state.isProcessing }
         try await Task.sleep(nanoseconds: 600_000_000)
-        precondition(InsertionTarget.snapshotReads == readsBeforeIncognito && state.correctionSuggestions.isEmpty)
-        state.clearHistory()
-        precondition(state.learnedVocabulary == ["Lumora"], "Purging speech must preserve explicitly remembered vocabulary")
+        precondition(InsertionTarget.snapshotReads == readsBeforeDisabling && state.correctionSuggestions.isEmpty)
+        precondition(state.learnedVocabulary == ["Lumora"], "Turning learning off must preserve explicitly remembered vocabulary")
         precondition(state.updateLearnedWord("Lumora", to: "LumoTech"))
         precondition(TextCleaner.shared.customVocabulary.contains("LumoTech"))
         precondition(!state.updateLearnedWord("LumoTech", to: "invalid,entry"))
         state.removeLearnedWord("LumoTech")
         precondition(state.learnedVocabulary.isEmpty && !TextCleaner.shared.customVocabulary.contains("LumoTech"))
         precondition(UserDefaults.standard.object(forKey: "presstowrite_learned_vocabulary") as? [String] == [])
-        state.correctionLearningEnabled = false
-        state.historyRetention = .clearOnQuit
         InsertionTarget.mockSnapshot = nil
         InsertionTarget.mockCursorContext = nil
 
@@ -673,6 +637,18 @@ struct AppStateTests {
         precondition(state.resolveEffectiveStyle(baseStyle: .professional, target: mockTarget) == .professional, "Disabled auto-adaptive must preserve base style")
         state.autoAdaptiveFormatting = true
 
-        print("AppState regressions passed: dictation, clipboard fallback, corrections, remembered vocabulary, native focus changes, Incognito, cancellation, undo failure, and auto-adaptive writing styles.")
+        // Nothing dictated reaches saved preferences, and no history setting exists.
+        let dictated = ["Test dictation", "Current result", "Canceled result", "um, asteria period",
+                        "latest project plan", "reaching the conclusion", "Send this to", "Call Zeph",
+                        "First sentence here", "Second sentence"]
+        for (key, value) in UserDefaults.standard.allValues {
+            precondition(!key.contains("retention") && !key.contains("history"), "No history setting may be saved: \(key)")
+            let saved = String(describing: value)
+            for phrase in dictated {
+                precondition(!saved.contains(phrase), "Dictated text must never be saved in preferences (\(key))")
+            }
+        }
+
+        print("AppState regressions passed: memory-only dictation, clipboard delivery and fallback, corrections, remembered vocabulary, native focus changes, expiring context, cancellation, undo failure, and auto-adaptive writing styles.")
     }
 }

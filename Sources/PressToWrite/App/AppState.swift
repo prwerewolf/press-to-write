@@ -2,28 +2,6 @@ import Foundation
 import SwiftUI
 import Combine
 
-public struct DictationItem: Identifiable, Codable {
-    public var id = UUID()
-    public var timestamp = Date()
-    public var rawText: String
-    public var cleanedText: String
-    public var durationSeconds: Double
-
-    public var wordCount: Int {
-        let words = cleanedText.split { $0.isWhitespace || $0.isPunctuation }
-        return words.count
-    }
-}
-
-public enum HistoryRetention: String, CaseIterable, Identifiable, Codable {
-    case off = "Incognito (Never save history)"
-    case clearOnQuit = "Session Only (Wipe on quit)"
-    case keepLast10 = "Keep Last 10 Items"
-    case keepLast50 = "Keep Last 50 Items"
-
-    public var id: String { rawValue }
-}
-
 public enum PillOrientation: String, CaseIterable, Identifiable, Codable {
     case horizontal
     case vertical
@@ -41,19 +19,12 @@ public final class AppState: ObservableObject {
     @Published public var showSuccess: Bool = false
     @Published public var currentAudioLevel: Float = 0.0
     @Published public var statusMessage: String = "Ready"
-    @Published public var lastTranscribedText: String = ""
     @Published public var hasPendingInsertion: Bool = false
     @Published public var engineStatus = LocalEngineStatus(phase: .loading, message: "Loading local speech model…")
 
-    // MARK: - History & Privacy
-    @Published public var history: [DictationItem] = []
-    @Published public var historyRetention: HistoryRetention = .clearOnQuit {
-        didSet {
-            UserDefaults.standard.set(historyRetention.rawValue, forKey: "presstowrite_retention")
-            applyRetentionPolicy()
-        }
-    }
-
+    // MARK: - Correction Learning
+    // Nothing the user says is stored: no recordings, transcripts, or history.
+    // Audio and text live in memory only while a single dictation needs them.
     @Published public var correctionLearningEnabled: Bool = false {
         didSet {
             UserDefaults.standard.set(correctionLearningEnabled, forKey: "presstowrite_correction_learning")
@@ -152,31 +123,25 @@ public final class AppState: ObservableObject {
     public var minRecordingDuration: Double = 0.25
 
     private var recordingStartTime: Date?
-    private var activeAudioURL: URL?
     private var feedbackResetTask: Task<Void, Never>?
     private var transcriptionTask: Task<Void, Never>?
     private var transcriptionID: UUID?
-    private var processingAudioURL: URL?
     private var insertionTarget: InsertionTarget?
     private var streamingSession: LocalStreamingSession?
     private var isRefreshingEngine = false
     private var lastInsertionTime: Date?
     private var lastInsertionPID: pid_t?
     private var lastInsertedEndsWithWhitespace: Bool = false
+    /// The end of the latest insertion, used as recognition context for a quick
+    /// follow-up dictation. Memory only; forgotten when the window closes.
+    private var recentInsertionContext: String?
+    private var contextExpiryTask: Task<Void, Never>?
+    var continuationContextLifetime: TimeInterval = 45
 
     private init() {
         loadSettings()
         setupAudioLevelCallback()
         setupHotkeys()
-        checkPendingRescueAudio()
-    }
-
-    private func checkPendingRescueAudio() {
-        if RescueAudioController.shared.hasRescueAudio,
-           let meta = RescueAudioController.shared.pendingMetadata,
-           meta.status == "pending" || meta.status == "failed" {
-            NSLog("[Press To Write] Found untranscribed rescue audio (%.2fs, status=%@)", meta.duration, meta.status)
-        }
     }
 
     private func loadSettings() {
@@ -185,11 +150,6 @@ public final class AppState: ObservableObject {
            let mode = SpeechMode(rawValue: saved) {
             speechMode = mode
         }
-        if let rawRetention = UserDefaults.standard.string(forKey: "presstowrite_retention"),
-           let retention = HistoryRetention(rawValue: rawRetention) {
-            self.historyRetention = retention
-        }
-
         if UserDefaults.standard.object(forKey: "presstowrite_auto_copy") != nil {
             self.autoCopyToClipboard = UserDefaults.standard.bool(forKey: "presstowrite_auto_copy")
         } else {
@@ -252,18 +212,11 @@ public final class AppState: ObservableObject {
             guard let self = self, self.isRecording else { return }
             self.currentAudioLevel = level
         }
-        AudioRecorder.shared.onRecordingError = { [weak self] error, url in
+        AudioRecorder.shared.onRecordingError = { [weak self] error in
             guard let self = self else { return }
-            let duration = Date().timeIntervalSince(self.recordingStartTime ?? Date())
-            let capturedURL = url ?? self.activeAudioURL
-            if let capturedURL, FileManager.default.fileExists(atPath: capturedURL.path), duration >= 1.0 {
-                NSLog("[Press To Write Rescue] Microphone error after %.2fs of speech: rescuing audio", duration)
-                RescueAudioController.shared.saveRescueAudio(from: capturedURL, duration: duration)
-                RescueAudioController.shared.markTranscriptionFailed(error: error.localizedDescription)
-            }
+            // The recorder already discarded the partial audio; nothing is kept.
             self.cancelDictation(showFeedback: false)
             HotkeyManager.shared.resetModifierStates()
-            if let url { try? FileManager.default.removeItem(at: url) }
             self.statusMessage = error.localizedDescription
             SoundEffects.shared.playError()
         }
@@ -315,7 +268,7 @@ public final class AppState: ObservableObject {
     }
 
     private func beginCorrectionLearning(capture: CorrectionCapture, target: InsertionTarget) {
-        guard correctionLearningEnabled, historyRetention != .off else { return }
+        guard correctionLearningEnabled else { return }
         correctionFocusWatch = target.watchCorrectionFocus { [weak self] in
             Task { @MainActor in self?.stopCorrectionLearning() }
         }
@@ -323,7 +276,7 @@ public final class AppState: ObservableObject {
             capture: capture, knownWords: TextCleaner.shared.customVocabulary,
             read: { target.correctionSnapshot() },
             onSuggestions: { [weak self] suggestions in
-                guard let self, self.correctionLearningEnabled, self.historyRetention != .off else { return }
+                guard let self, self.correctionLearningEnabled else { return }
                 let known = Set(TextCleaner.shared.customVocabulary.map { $0.lowercased() })
                 self.correctionSuggestions = suggestions.filter {
                     !self.dismissedCorrections.contains($0.id) && !known.contains($0.word.lowercased())
@@ -339,7 +292,7 @@ public final class AppState: ObservableObject {
     }
 
     public func rememberCorrection(_ suggestion: VocabularySuggestion) {
-        guard correctionLearningEnabled, historyRetention != .off,
+        guard correctionLearningEnabled,
               correctionSuggestions.contains(suggestion), let word = Self.validLearnedWord(suggestion.word),
               learnedVocabulary.count < 256 else { return }
         if !TextCleaner.shared.customVocabulary.contains(where: { $0.caseInsensitiveCompare(word) == .orderedSame }) {
@@ -504,12 +457,12 @@ public final class AppState: ObservableObject {
             let session = speechMode == .fast
                 ? LocalDaemonClient.shared.startStreaming(vocabulary: TextCleaner.shared.customVocabulary) : nil
             streamingSession = session
-            let url = try AudioRecorder.shared.startRecording(onPCM16: session.map { session in
+            // Fast mode consumes every frame as it streams, so the recorder keeps none.
+            try AudioRecorder.shared.startRecording(retainPCM: session == nil, onPCM16: session.map { session in
                 { pcm in session.appendPCM16(pcm) }
             })
             NSLog("[Press To Write Timing] start_audio=%.3fs", ProcessInfo.processInfo.systemUptime - audioStartedAt)
             self.insertionTarget = target
-            self.activeAudioURL = url
             self.isRecording = true
             self.recordingStartTime = Date()
             self.statusMessage = "Listening..."
@@ -532,13 +485,9 @@ public final class AppState: ObservableObject {
 
         // Accidental Click Guard: Silently discard clicks shorter than minRecordingDuration (default 0.25s)
         if minRecordingDuration > 0 && duration < minRecordingDuration {
-            let audioURL = AudioRecorder.shared.stopRecording() ?? activeAudioURL
+            _ = AudioRecorder.shared.stopRecording()
             streamingSession?.cancel()
             streamingSession = nil
-            if let audioURL, FileManager.default.fileExists(atPath: audioURL.path) {
-                try? FileManager.default.removeItem(at: audioURL)
-            }
-            activeAudioURL = nil
             recordingStartTime = nil
             insertionTarget = nil
             self.isRecording = false
@@ -557,13 +506,11 @@ public final class AppState: ObservableObject {
         self.currentAudioLevel = 0.0
         SoundEffects.shared.playStop()
 
-        let audioURL = AudioRecorder.shared.stopRecording() ?? activeAudioURL
+        // This dictation's task owns the only copy of the audio and releases it when done.
+        let pcm = AudioRecorder.shared.stopRecording() ?? Data()
         NSLog("[Press To Write Timing] stop_audio=%.3fs", ProcessInfo.processInfo.systemUptime - pipelineStartedAt)
         let session = streamingSession
         streamingSession = nil
-        if let audioURL, FileManager.default.fileExists(atPath: audioURL.path) {
-            RescueAudioController.shared.saveRescueAudio(from: audioURL, duration: duration)
-        }
         let target = insertionTarget
         let vocabulary = TextCleaner.shared.customVocabulary
         let replacements = TextCleaner.shared.customReplacements
@@ -576,14 +523,12 @@ public final class AppState: ObservableObject {
                let currentPID = target?.targetPID,
                lastPID == currentPID,
                Date().timeIntervalSince(lastTime) < 45.0,
-               !self.lastTranscribedText.isEmpty {
-                contextText = String(self.lastTranscribedText.suffix(200))
+               let recentContext = self.recentInsertionContext {
+                contextText = recentContext
             }
         }
         let requestID = UUID()
         transcriptionID = requestID
-        processingAudioURL = audioURL
-        activeAudioURL = nil
         recordingStartTime = nil
         insertionTarget = nil
 
@@ -591,20 +536,15 @@ public final class AppState: ObservableObject {
             defer {
                 session?.cancel()
                 NSLog("[Press To Write Timing] release_to_completion=%.3fs cancelled=%d", ProcessInfo.processInfo.systemUptime - pipelineStartedAt, Task.isCancelled ? 1 : 0)
-                // Release the recording as soon as processing finishes, independently of feedback.
-                if let url = audioURL, FileManager.default.fileExists(atPath: url.path) {
-                    try? FileManager.default.removeItem(at: url)
-                }
                 if self.transcriptionID == requestID {
                     self.isProcessing = false
-                    self.processingAudioURL = nil
                     self.transcriptionID = nil
                     self.transcriptionTask = nil
                 }
             }
 
             guard self.transcriptionID == requestID, !Task.isCancelled else { return }
-            guard let url = audioURL, FileManager.default.fileExists(atPath: url.path) else {
+            if session == nil && pcm.isEmpty {
                 self.statusMessage = "No Audio"
                 self.scheduleFeedbackReset(after: 1_200_000_000)
                 return
@@ -616,7 +556,7 @@ public final class AppState: ObservableObject {
                 if let session {
                     rawText = try await session.finish()
                 } else {
-                    rawText = try await LocalDaemonClient.shared.transcribe(audioFileURL: url, vocabulary: vocabulary, style: effectiveStyle, context: contextText)
+                    rawText = try await LocalDaemonClient.shared.transcribe(pcm16: pcm, vocabulary: vocabulary, style: effectiveStyle, context: contextText)
                 }
                 NSLog("[Press To Write Timing] recognition=%.3fs", ProcessInfo.processInfo.systemUptime - recognitionStartedAt)
                 try Task.checkCancellation()
@@ -650,7 +590,6 @@ public final class AppState: ObservableObject {
                 }
 
                 if !cleanedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    RescueAudioController.shared.markTranscriptionCompleted()
                     var needsManualInsertion = false
 
                     // Smart Prefix Spacing: prepend space if following a prior insertion in same target
@@ -669,7 +608,7 @@ public final class AppState: ObservableObject {
                     if self.autoInsertText {
                         let hasAccessibility = HotkeyManager.isAccessibilityGranted()
                         if hasAccessibility {
-                            let capture = self.correctionLearningEnabled && self.historyRetention != .off
+                            let capture = self.correctionLearningEnabled
                                 ? effectiveTarget?.correctionSnapshot().flatMap {
                                     CorrectionCapture(before: $0, insertedText: textToInsert)
                                 } : nil
@@ -687,33 +626,28 @@ public final class AppState: ObservableObject {
                                 self.lastInsertionTime = Date()
                                 self.lastInsertionPID = effectiveTarget?.targetPID
                                 self.lastInsertedEndsWithWhitespace = textToInsert.hasSuffix(" ") || textToInsert.hasSuffix("\n")
+                                self.rememberInsertionContext(cleanedText)
                                 if let capture, let effectiveTarget {
                                     self.beginCorrectionLearning(capture: capture, target: effectiveTarget)
                                 }
                             } else {
                                 // Always place speech on clipboard if auto-insertion could not complete
-                                NSPasteboard.general.clearContents()
-                                NSPasteboard.general.setString(cleanedText, forType: .string)
+                                TextInserter.shared.copyForManualPaste(cleanedText, keepInHistory: self.autoCopyToClipboard)
                                 needsManualInsertion = true
                                 self.statusMessage = "Text ready: copied for manual paste"
                             }
                         } else {
                             HotkeyManager.requestAccessibilityPermission()
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(cleanedText, forType: .string)
+                            TextInserter.shared.copyForManualPaste(cleanedText, keepInHistory: self.autoCopyToClipboard)
                             self.statusMessage = "Copied! (Grant Accessibility to auto-insert)"
                         }
                     } else {
-                        if self.autoCopyToClipboard {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(cleanedText, forType: .string)
-                            self.statusMessage = "Copied to Clipboard!"
-                        } else {
-                            self.statusMessage = "Transcribed! (Click Copy in toolbar)"
-                        }
+                        // Nothing is kept for later, so without insertion the
+                        // clipboard is where this dictation's text is delivered.
+                        TextInserter.shared.copyForManualPaste(cleanedText, keepInHistory: self.autoCopyToClipboard)
+                        self.statusMessage = "Copied to Clipboard!"
                     }
 
-                    self.lastTranscribedText = cleanedText
                     self.hasPendingInsertion = needsManualInsertion
                     // Visual and audio feedback
                     self.showSuccess = !self.hasPendingInsertion
@@ -723,16 +657,12 @@ public final class AppState: ObservableObject {
                         SoundEffects.shared.playError()
                     }
 
-                    // Record history according to privacy retention settings
-                    self.recordHistory(raw: rawText, cleaned: cleanedText, duration: duration)
-
                     if !self.hasPendingInsertion {
                         self.scheduleFeedbackReset(after: 2_200_000_000)
                     } else {
                         self.scheduleFeedbackReset(after: 3_500_000_000)
                     }
                 } else {
-                    RescueAudioController.shared.markTranscriptionCompleted()
                     self.statusMessage = "No Speech Detected"
                     self.scheduleFeedbackReset(after: 1_200_000_000)
                 }
@@ -741,97 +671,6 @@ public final class AppState: ObservableObject {
             } catch {
                 guard self.transcriptionID == requestID, !Task.isCancelled else { return }
                 NSLog("[Press To Write] Transcription error: \(error)")
-                RescueAudioController.shared.markTranscriptionFailed(error: error.localizedDescription)
-                let msg = error.localizedDescription
-                self.statusMessage = msg.count > 40 ? String(msg.prefix(37)) + "..." : msg
-                SoundEffects.shared.playError()
-                self.scheduleFeedbackReset(after: 3_000_000_000)
-            }
-        }
-    }
-
-    public func transcribeRescueAudio() {
-        guard !isRecording, !isProcessing else { return }
-        stopCorrectionLearning()
-        guard RescueAudioController.shared.hasRescueAudio else {
-            statusMessage = "No Rescued Audio"
-            scheduleFeedbackReset(after: 1_500_000_000)
-            return
-        }
-
-        let duration = RescueAudioController.shared.pendingMetadata?.duration ?? 0.0
-
-        // The speech engine deletes every file it is asked to transcribe, even after
-        // an error. Give it a disposable copy so a failed or canceled attempt leaves
-        // the saved recording available for another try.
-        let workingURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("presstowrite_rescue_\(UUID().uuidString).wav")
-        do {
-            try FileManager.default.copyItem(at: RescueAudioController.shared.rescueAudioURL, to: workingURL)
-        } catch {
-            NSLog("[Press To Write Rescue] Could not read rescued audio: %@", error.localizedDescription)
-            clearFeedback()
-            statusMessage = "Rescued Audio Unreadable"
-            SoundEffects.shared.playError()
-            scheduleFeedbackReset(after: 3_000_000_000)
-            return
-        }
-
-        clearFeedback()
-        self.isProcessing = true
-        self.statusMessage = "Transcribing Rescue Audio..."
-        self.currentAudioLevel = 0.0
-        SoundEffects.shared.playStop()
-
-        let vocabulary = TextCleaner.shared.customVocabulary
-        let replacements = TextCleaner.shared.customReplacements
-        let effectiveStyle = resolveEffectiveStyle(baseStyle: transcriptionStyle, target: nil)
-        let requestID = UUID()
-        transcriptionID = requestID
-        processingAudioURL = workingURL
-
-        transcriptionTask = Task {
-            defer {
-                try? FileManager.default.removeItem(at: workingURL)
-                if self.transcriptionID == requestID {
-                    self.isProcessing = false
-                    self.processingAudioURL = nil
-                    self.transcriptionID = nil
-                    self.transcriptionTask = nil
-                }
-            }
-
-            guard self.transcriptionID == requestID, !Task.isCancelled else { return }
-
-            do {
-                let rawText = try await LocalDaemonClient.shared.transcribe(audioFileURL: workingURL, vocabulary: vocabulary, style: effectiveStyle)
-                try Task.checkCancellation()
-                guard self.transcriptionID == requestID else { return }
-                let cleanedText = TextCleaner.shared.clean(text: rawText, style: effectiveStyle, vocabulary: vocabulary, replacements: replacements)
-
-                if !cleanedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    RescueAudioController.shared.markTranscriptionCompleted()
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(cleanedText, forType: .string)
-
-                    self.lastTranscribedText = cleanedText
-                    self.hasPendingInsertion = false
-                    self.statusMessage = "Rescued Audio Copied to Clipboard!"
-                    self.showSuccess = true
-                    SoundEffects.shared.playSuccess()
-
-                    self.recordHistory(raw: rawText, cleaned: cleanedText, duration: duration)
-                    self.scheduleFeedbackReset(after: 3_500_000_000)
-                } else {
-                    RescueAudioController.shared.markTranscriptionCompleted()
-                    self.statusMessage = "No Speech in Rescued Audio"
-                    self.scheduleFeedbackReset(after: 2_000_000_000)
-                }
-            } catch is CancellationError {
-            } catch {
-                guard self.transcriptionID == requestID, !Task.isCancelled else { return }
-                NSLog("[Press To Write] Rescue transcription error: \(error)")
-                RescueAudioController.shared.markTranscriptionFailed(error: error.localizedDescription)
                 let msg = error.localizedDescription
                 self.statusMessage = msg.count > 40 ? String(msg.prefix(37)) + "..." : msg
                 SoundEffects.shared.playError()
@@ -844,17 +683,13 @@ public final class AppState: ObservableObject {
         stopCorrectionLearning()
         guard isRecording || isProcessing else { return }
         clearFeedback()
-        let recordedURL = isRecording ? AudioRecorder.shared.stopRecording() : nil
+        // Stopping discards the captured audio; a canceled task releases its copy.
+        if isRecording { _ = AudioRecorder.shared.stopRecording() }
         streamingSession?.cancel()
         streamingSession = nil
         transcriptionID = nil
         transcriptionTask?.cancel()
         transcriptionTask = nil
-        for url in [recordedURL, activeAudioURL, processingAudioURL].compactMap({ $0 }) {
-            try? FileManager.default.removeItem(at: url)
-        }
-        activeAudioURL = nil
-        processingAudioURL = nil
         insertionTarget = nil
         recordingStartTime = nil
         isRecording = false
@@ -888,60 +723,22 @@ public final class AppState: ObservableObject {
         }
     }
 
-    private func recordHistory(raw: String, cleaned: String, duration: Double) {
-        guard historyRetention != .off else { return }
-
-        let item = DictationItem(
-            rawText: raw,
-            cleanedText: cleaned,
-            durationSeconds: duration
-        )
-
-        history.insert(item, at: 0)
-        applyRetentionPolicy()
-    }
-
-    private func applyRetentionPolicy() {
-        switch historyRetention {
-        case .off:
-            clearHistory()
-        case .clearOnQuit:
-            // kept in memory, not persisted to disk
-            break
-        case .keepLast10:
-            if history.count > 10 {
-                history = Array(history.prefix(10))
+    /// Keeps the end of the latest insertion in memory for the continuation
+    /// window only, then forgets it. It is never shown, logged, or saved.
+    private func rememberInsertionContext(_ text: String) {
+        recentInsertionContext = String(text.suffix(200))
+        contextExpiryTask?.cancel()
+        let lifetime = UInt64(max(0, continuationContextLifetime) * 1_000_000_000)
+        contextExpiryTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: lifetime)
+            } catch {
+                return
             }
-        case .keepLast50:
-            if history.count > 50 {
-                history = Array(history.prefix(50))
-            }
+            // A newer insertion may have replaced this timer after its sleep ended.
+            guard !Task.isCancelled else { return }
+            self?.recentInsertionContext = nil
+            self?.contextExpiryTask = nil
         }
-    }
-
-    public func clearHistory() {
-        stopCorrectionLearning()
-        history.removeAll()
-        lastTranscribedText = ""
-        hasPendingInsertion = false
-        lastInsertionTime = nil
-        lastInsertionPID = nil
-        lastInsertedEndsWithWhitespace = false
-        clearFeedback()
-        if !isRecording && !isProcessing {
-            statusMessage = "Ready"
-        }
-    }
-
-    public func copyLastDictation() {
-        guard !lastTranscribedText.isEmpty else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(lastTranscribedText, forType: .string)
-        hasPendingInsertion = false
-        self.statusMessage = "Copied to Clipboard!"
-        self.showSuccess = true
-        SoundEffects.shared.playSuccess()
-
-        scheduleFeedbackReset(after: 1_800_000_000)
     }
 }

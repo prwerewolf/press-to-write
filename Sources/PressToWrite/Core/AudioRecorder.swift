@@ -13,8 +13,7 @@ public final class AudioRecorder: NSObject {
     public static let shared = AudioRecorder()
 
     private var audioEngine: AVAudioEngine?
-    private var audioFile: AVAudioFile?
-    private var tempFileURL: URL?
+    private var capturedAudio: CapturedAudio?
     private var isRecordingInternal = false
     private var isTestingInternal = false
     private var captureToken: UUID?
@@ -23,9 +22,9 @@ public final class AudioRecorder: NSObject {
     private var testFailure: ((Error) -> Void)?
 
     public var onAudioLevel: ((Float) -> Void)?
-    /// Delivered on the main queue after capture has stopped. The caller owns
-    /// removal of the incomplete WAV and resetting the dictation interface.
-    public var onRecordingError: ((Error, URL?) -> Void)?
+    /// Delivered on the main queue after capture has stopped and its audio has
+    /// been discarded. The caller owns resetting the dictation interface.
+    public var onRecordingError: ((Error) -> Void)?
 
     public var selectedInputUID: String {
         get { MicrophoneController.shared.selectedInputUID }
@@ -69,9 +68,11 @@ public final class AudioRecorder: NSObject {
         }
     }
 
-    /// Starts a 16 kHz mono PCM recording using the best available input device with automatic fallback.
-    public func startRecording(onPCM16: ((Data) -> Void)? = nil) throws -> URL {
-        if isRecordingInternal, let existingURL = tempFileURL { return existingURL }
+    /// Starts a 16 kHz mono PCM16 recording using the best available input device
+    /// with automatic fallback. Audio is held only in memory, never in a file.
+    /// Pass `retainPCM: false` when `onPCM16` consumes every frame, so nothing is kept.
+    public func startRecording(retainPCM: Bool = true, onPCM16: ((Data) -> Void)? = nil) throws {
+        if isRecordingInternal { return }
         MicrophoneController.shared.stopTest()
 
         let microphone = MicrophoneController.shared
@@ -86,8 +87,8 @@ public final class AudioRecorder: NSObject {
         var lastError: Error?
         for candidate in attempts {
             do {
-                let url = try attemptStartCapture(device: candidate, onPCM16: onPCM16)
-                return url
+                try attemptStartCapture(device: candidate, retainPCM: retainPCM, onPCM16: onPCM16)
+                return
             } catch {
                 lastError = error
                 NSLog("[Press To Write] Audio capture candidate %@ failed: %@", candidate?.name ?? "AUHAL default", error.localizedDescription)
@@ -98,35 +99,26 @@ public final class AudioRecorder: NSObject {
         throw lastError ?? MicrophoneError.cannotSelectDevice
     }
 
-    private func attemptStartCapture(device: AudioInputDevice?, onPCM16: ((Data) -> Void)?) throws -> URL {
+    private func attemptStartCapture(device: AudioInputDevice?, retainPCM: Bool, onPCM16: ((Data) -> Void)?) throws {
         let (engine, resolvedDevice, inputFormat) = try makeInputEngine(device: device)
-        let outputURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("presstowrite_\(UUID().uuidString).wav")
         let token = UUID()
         let gate = CaptureGate()
+        let audio = retainPCM ? CapturedAudio() : nil
         var tapInstalled = false
 
         do {
             let converter = try Self.makeWhisperConverter(from: inputFormat)
             let whisperFormat = converter.outputFormat
 
-            let file = try AVAudioFile(
-                forWriting: outputURL,
-                settings: whisperFormat.settings,
-                commonFormat: .pcmFormatInt16,
-                interleaved: false
-            )
             audioEngine = engine
-            audioFile = file
-            tempFileURL = outputURL
+            capturedAudio = audio
             captureToken = token
             captureGate = gate
             isRecordingInternal = true
 
-            engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self, weak file] buffer, _ in
+            engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
                 guard let self else { return }
                 gate.performWhileActive {
-                    guard let file else { return }
                     let level = Self.calculateAudioLevel(buffer: buffer)
                     DispatchQueue.main.async { [weak self] in
                         guard let self, self.captureToken == token else { return }
@@ -150,14 +142,10 @@ public final class AudioRecorder: NSObject {
                         self.reportFailure(conversionError, token: token)
                         return
                     }
-                    if converted.frameLength > 0 {
-                        do {
-                            try file.write(from: converted)
-                            if let onPCM16, let samples = converted.int16ChannelData?[0] {
-                                onPCM16(Data(bytes: samples, count: Int(converted.frameLength) * 2))
-                            }
-                        }
-                        catch { self.reportFailure(error, token: token) }
+                    if converted.frameLength > 0, let samples = converted.int16ChannelData?[0] {
+                        let pcm = Data(bytes: samples, count: Int(converted.frameLength) * 2)
+                        audio?.pcm.append(pcm)
+                        onPCM16?(pcm)
                     }
                 }
             }
@@ -166,34 +154,32 @@ public final class AudioRecorder: NSObject {
             try engine.start()
             watchConfiguration(engine, device: resolvedDevice, format: inputFormat, token: token)
             MicrophoneController.shared.recordingStarted(device: resolvedDevice)
-            return outputURL
         } catch {
             gate.close()
             if tapInstalled { engine.inputNode.removeTap(onBus: 0) }
             engine.stop()
             audioEngine = nil
-            audioFile = nil
-            tempFileURL = nil
+            capturedAudio = nil
             captureToken = nil
             captureGate = nil
             isRecordingInternal = false
-            try? FileManager.default.removeItem(at: outputURL)
             throw error
         }
     }
 
-    public func stopRecording() -> URL? {
+    /// Returns the captured PCM16 audio, empty when it was not retained, or nil
+    /// when nothing was recording. The recorder keeps no copy.
+    public func stopRecording() -> Data? {
         guard isRecordingInternal else { return nil }
         isRecordingInternal = false
         endCapture()
-        audioFile = nil
-        let url = tempFileURL
-        tempFileURL = nil
+        let pcm = capturedAudio?.pcm ?? Data()
+        capturedAudio = nil
         MicrophoneController.shared.recordingStopped()
-        return url
+        return pcm
     }
 
-    /// Only computes levels in memory: no file, conversion, or transcription.
+    /// Only computes levels in memory: no capture, conversion, or transcription.
     func startMicrophoneTest(
         onLevel: @escaping (Float) -> Void,
         onFailure: @escaping (Error) -> Void
@@ -368,12 +354,8 @@ public final class AudioRecorder: NSObject {
         DispatchQueue.main.async { [weak self] in
             guard let self, self.captureToken == token else { return }
             if self.isRecordingInternal {
-                let url = self.stopRecording()
-                if let callback = self.onRecordingError {
-                    callback(error, url)
-                } else if let url {
-                    try? FileManager.default.removeItem(at: url)
-                }
+                _ = self.stopRecording()
+                self.onRecordingError?(error)
             } else if self.isTestingInternal {
                 let callback = self.testFailure
                 self.stopMicrophoneTest()
@@ -418,8 +400,14 @@ public final class AudioRecorder: NSObject {
     }
 }
 
-/// Closing the gate waits for any in-flight buffer write and prevents further
-/// tap work, so the WAV is complete before stopRecording returns its URL.
+/// One dictation's 16 kHz mono PCM16 audio, held in memory only. The tap appends
+/// inside its capture gate; stopRecording reads it after the gate has closed.
+private final class CapturedAudio {
+    var pcm = Data()
+}
+
+/// Closing the gate waits for any in-flight buffer append and prevents further
+/// tap work, so the audio is complete before stopRecording returns it.
 private final class CaptureGate {
     private let lock = NSLock()
     private var active = true

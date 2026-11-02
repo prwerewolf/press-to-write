@@ -9,39 +9,43 @@ only complete files already on disk. There is no cloud transcription API key.
 | Data | Storage |
 | --- | --- |
 | Vocabulary, snippets, microphone selection, other preferences | macOS UserDefaults for the app |
-| Latest audio recording and recovery metadata | `~/Library/Application Support/Press To Write/` |
+| Dictation audio | Memory only, for one dictation; never written to disk |
 | Python environment | `~/Library/Application Support/Press To Write/venv/` |
 | Speech model weights | Local Hugging Face cache or a user-selected directory |
 | Optional Nemotron model, Metal runtime, setup cache | `~/Library/Application Support/Press To Write/fast/` |
 | Fast-mode audio queue and recognition state | Bounded memory and a private Unix socket; cleared when the session ends |
-| Diagnostic log | `/tmp/presstowrite_daemon.log` |
-| Dictation history | Memory only; cleared when the app exits |
+| Diagnostic log (engine status, never dictated text) | `/tmp/presstowrite_daemon.log` |
+| Dictated text | Memory only until inserted or copied; none is kept as history |
+| End of the latest insertion, as context for a follow-up | Memory only; forgotten after 45 seconds |
 | Accepted learned spellings | App UserDefaults on this Mac; edit or clear in Settings → Writing |
 | Correction-learning snapshots and suggestions | Memory only; never written to logs or files |
 
-Correction learning is off by default. When enabled outside Incognito, a successful
+Correction learning is off by default. When enabled, a successful
 paste can start up to 30 seconds of observation of the same focused, non-secure
 accessible control. Reads are bounded to 8,192 UTF-16 units, and dictations above
 2,048 units are excluded. A verified paste and unchanged surrounding text are
 required before edits can produce a spelling suggestion. Focus changes, new
-dictations, cancellation, purging history, or disabling learning stop observation.
-Only clicking Remember saves a word. Accepted words survive clearing dictation
-history; forget them separately in Learned Vocabulary. No model is retrained and
-no correction data is sent to another service.
+dictations, cancellation, or disabling learning stop observation. Only clicking
+Remember saves a word; forget accepted words in Learned Vocabulary. No model is
+retrained and no correction data is sent to another service.
 
 Both recognition modes receive the same merged custom and remembered vocabulary
 locally. Nemotron streams 16 kHz PCM into an owned Metal worker while recording;
 it opens no HTTP service and needs no account, API key, or model download during
 dictation. Its optional installer downloads only public runtime/model assets
 and a byte range containing the original tokenizer. It never reads recordings,
-history, vocabulary, or app preferences. Whisper stays the default and handles
-recovery audio. Cancellation terminates an active fast worker and reloads a
-fresh model before another fast dictation can start.
+vocabulary, or app preferences. Whisper stays the default. Cancellation
+terminates an active fast worker and reloads a fresh model before another fast
+dictation can start.
 
-Quitting the app does not erase the recovery recording. Remove it from Application
-Support yourself when you no longer want it retained. Incognito changes in-memory
-history behavior; it does not disable audio recovery. Applications you dictate
-into and the system clipboard can retain or sync their own copies of text.
+Nothing you say is stored, in any mode. Audio is captured into memory, sent to
+the local engine over a private Unix socket, and released when that dictation
+finishes. There is no saved recording, transcript, history, or recovery file. A
+dictation interrupted by a microphone or engine failure is discarded. At launch
+the app deletes the recording that earlier builds kept in Application Support
+(`last_recording.wav` and `rescue_metadata.json`) and any temporary recording a
+crash left behind. Applications you dictate into and the system clipboard can
+retain or sync their own copies of text.
 
 ## Files that must stay private
 

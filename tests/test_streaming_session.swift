@@ -33,8 +33,9 @@ struct StreamingSessionTests {
             defer { close(sockets[1]) }
             let begin = try client.readJSON(from: sockets[1])
             precondition(begin["action"] as? String == "stream")
+            precondition(begin["protocol_version"] as? Int == client.protocolVersion)
             precondition(begin["vocabulary"] as? [String] == ["Lumora", "Acmetron"])
-            try client.sendJSON(["protocol_version": 3, "vocabulary_count": 2], to: sockets[1])
+            try client.sendJSON(["protocol_version": client.protocolVersion, "vocabulary_count": 2], to: sockets[1])
             var frames: [Data] = []
             while true {
                 let header = receive(sockets[1], count: 4)
@@ -43,7 +44,7 @@ struct StreamingSessionTests {
                 frames.append(receive(sockets[1], count: count))
             }
             precondition(frames == [Data([1, 0, 2, 0]), Data([3, 0])], "The short final buffer must arrive before finish")
-            try client.sendJSON(["protocol_version": 3, "text": "Lumora finishes the final word"], to: sockets[1])
+            try client.sendJSON(["protocol_version": client.protocolVersion, "text": "Lumora finishes the final word"], to: sockets[1])
         }
         let session = LocalStreamingSession(client: client, vocabulary: ["Lumora", "Acmetron"],
                                             connect: { sockets[0] }, cancelRequest: { _ in })
@@ -71,9 +72,9 @@ struct StreamingSessionTests {
         for _ in 0..<6 { stalled.appendPCM16(Data(repeating: 0, count: 32000)) }
         do {
             _ = try await stalled.finish()
-            preconditionFailure("A buffer overrun must retain rescue audio instead of partial text")
+            preconditionFailure("A buffer overrun must fail instead of returning partial text")
         } catch {
-            precondition(error.localizedDescription.contains("Rescue Audio"))
+            precondition(error.localizedDescription.contains("dictate again"))
         }
         close(stalledSockets[1])
         print("Streaming session passed: vocabulary delivery, ordered final frames, finish, early cancel, bounded audio.")
